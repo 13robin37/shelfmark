@@ -43,7 +43,7 @@ def _run(task, tmp_path, *, mirrors_list, fetch_page, download_url):
 def test_download_strips_prefix_resolves_and_writes(tmp_path):
     captured = {}
 
-    def fetch_page(url, timeout=(5, 10)):
+    def fetch_page(url, timeout=(5, 10), **_kwargs):
         return html.ADS_HTML
 
     def download_url(link, size, prog, cancel, sel, status, referer=None):
@@ -72,14 +72,14 @@ def test_download_accepts_bare_md5_task_id(tmp_path):
         _task(html.MD5_A),
         tmp_path,
         mirrors_list=["https://libgen.li"],
-        fetch_page=lambda url, timeout=(5, 10): html.ADS_HTML,
+        fetch_page=lambda url, timeout=(5, 10), **_kwargs: html.ADS_HTML,
         download_url=lambda *a, **k: _buf(),
     )
     assert result == str(tmp_path / f"{html.MD5_A}.cbr")
 
 
 def test_download_falls_through_to_second_mirror(tmp_path):
-    def fetch_page(url, timeout=(5, 10)):
+    def fetch_page(url, timeout=(5, 10), **_kwargs):
         return None if "dead" in url else html.ADS_HTML
 
     result, _ = _run(
@@ -97,7 +97,7 @@ def test_download_all_mirrors_fail_returns_none(tmp_path):
         _task(f"libgen:{html.MD5_A}"),
         tmp_path,
         mirrors_list=["https://a", "https://b"],
-        fetch_page=lambda url, timeout=(5, 10): None,
+        fetch_page=lambda url, timeout=(5, 10), **_kwargs: None,
         download_url=lambda *a, **k: _buf(),
     )
     assert result is None
@@ -109,7 +109,7 @@ def test_download_too_small_file_is_rejected(tmp_path):
         _task(f"libgen:{html.MD5_A}"),
         tmp_path,
         mirrors_list=["https://libgen.li"],
-        fetch_page=lambda url, timeout=(5, 10): html.ADS_HTML,
+        fetch_page=lambda url, timeout=(5, 10), **_kwargs: html.ADS_HTML,
         download_url=lambda *a, **k: _buf(100),  # below _MIN_VALID_FILE_SIZE
     )
     assert result is None

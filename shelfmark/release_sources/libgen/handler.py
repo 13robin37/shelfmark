@@ -27,6 +27,9 @@ logger = setup_logger(__name__)
 # Files under this size are almost certainly an error/challenge page, not a book. Same
 # threshold direct_download uses; duplicated to keep the package self-contained.
 _MIN_VALID_FILE_SIZE = 10 * 1024
+# One retry for a dropped connection or 5xx on the ads.php page before trying the next
+# mirror - with a single mirror configured, a blip there used to fail the whole download.
+_ADS_PAGE_ATTEMPTS = 2
 
 
 @register_handler("libgen")
@@ -69,7 +72,7 @@ class LibgenHandler(DownloadHandler):
 
                 ads_url = f"{base.rstrip('/')}/ads.php?md5={md5}"
                 status_callback("resolving", "Resolving Libgen")
-                ads_html = scraper.fetch_page(ads_url, (5, 10))
+                ads_html = scraper.fetch_page(ads_url, (5, 10), attempts=_ADS_PAGE_ATTEMPTS)
                 if not ads_html:
                     continue
                 get_url = scraper.resolve_download_url(ads_html, base)

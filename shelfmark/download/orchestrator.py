@@ -84,6 +84,23 @@ _PROGRESS_BROADCAST_START_PERCENT = 1
 _PROGRESS_BROADCAST_COMPLETE_PERCENT = 99
 _PROGRESS_BROADCAST_MIN_DELTA = 10
 
+# Opt-in automatic retry (AUTO_RETRY_FAILED_DOWNLOADS). A failed download is parked in
+# QUEUED - but outside the priority queue - until its backoff delay has passed, and the
+# coordinator loop requeues it then. Only the download phase of these sources is
+# retried: their failures are mostly mirrors that are down, throttled or slow, which
+# time heals. Post-processing failures and a disabled source do not heal by waiting.
+# In-memory only, like the queue itself.
+_AUTO_RETRY_SOURCES = frozenset({"direct_download", "libgen"})
+_AUTO_RETRY_SKIP_ERROR_TYPES = frozenset({"SourceUnavailable"})
+_AUTO_RETRY_DEFAULT_MAX_ATTEMPTS = 3
+_AUTO_RETRY_DEFAULT_INITIAL_DELAY = 60.0
+_AUTO_RETRY_DEFAULT_MAX_DELAY = 1800.0
+# +/- spread applied to every delay so tasks that failed together do not retry together.
+_AUTO_RETRY_JITTER = 0.1
+_auto_retry_lock = Lock()
+_auto_retry_counts: dict[str, int] = {}  # retries already scheduled per task
+_auto_retry_due: dict[str, float] = {}  # time.monotonic() at which a parked task requeues
+
 
 def _is_plain_email_address(value: str) -> bool:
     parsed = parseaddr(value or "")[1]
@@ -945,6 +962,8 @@ def update_download_status(book_id: str, status: str, message: str | None = None
 def cancel_download(book_id: str) -> bool:
     """Cancel a download."""
     result = book_queue.cancel_download(book_id)
+    if result:
+        _clear_auto_retry_state(book_id)
 
     # Broadcast status update via WebSocket
     if result and ws_manager and ws_manager.is_enabled():
@@ -973,6 +992,8 @@ def retry_download(book_id: str) -> tuple[bool, str | None]:
     task.last_error_message = None
     task.last_error_type = None
     task.priority = -10
+    # A manual retry starts a fresh automatic-retry budget.
+    _clear_auto_retry_state(book_id)
 
     if not book_queue.enqueue_existing(book_id, priority=-10):
         return False, "Failed to requeue download"
@@ -1034,6 +1055,113 @@ def _finalize_download_failure(task_id: str) -> None:
     book_queue.update_status(task_id, QueueStatus.ERROR)
 
 
+def _auto_retry_settings() -> tuple[int, float, float] | None:
+    """(max retries, initial delay, max delay) when automatic retry is on, else None."""
+    if not config.get("AUTO_RETRY_FAILED_DOWNLOADS", False):
+        return None
+    max_attempts = (
+        _optional_positive_int(config.get("AUTO_RETRY_MAX_ATTEMPTS"))
+        or _AUTO_RETRY_DEFAULT_MAX_ATTEMPTS
+    )
+    initial_delay = _config_float(
+        config.get("AUTO_RETRY_INITIAL_DELAY"), _AUTO_RETRY_DEFAULT_INITIAL_DELAY
+    )
+    max_delay = _config_float(config.get("AUTO_RETRY_MAX_DELAY"), _AUTO_RETRY_DEFAULT_MAX_DELAY)
+    initial_delay = max(initial_delay, 0.0)
+    return max_attempts, initial_delay, max(max_delay, initial_delay)
+
+
+def _auto_retry_delay(retry_number: int, initial_delay: float, max_delay: float) -> float:
+    """Exponential backoff for the n-th automatic retry (1-based), with jitter."""
+    delay = min(max_delay, initial_delay * 2 ** (retry_number - 1))
+    return delay * _RNG.uniform(1 - _AUTO_RETRY_JITTER, 1 + _AUTO_RETRY_JITTER)
+
+
+def _format_retry_wait(seconds: float) -> str:
+    if seconds < 90:
+        return f"{round(seconds)}s"
+    return f"{round(seconds / 60)} min"
+
+
+def _is_auto_retryable(task: DownloadTask) -> bool:
+    return (
+        task.source in _AUTO_RETRY_SOURCES
+        and task.last_error_type not in _AUTO_RETRY_SKIP_ERROR_TYPES
+        # A staged file means the download itself worked and post-processing failed.
+        and not task.staged_path
+    )
+
+
+def _clear_auto_retry_state(task_id: str) -> None:
+    with _auto_retry_lock:
+        _auto_retry_counts.pop(task_id, None)
+        _auto_retry_due.pop(task_id, None)
+
+
+def _schedule_auto_retry(task_id: str) -> bool:
+    """Park a failed download for a delayed retry. False when it should fail now."""
+    settings = _auto_retry_settings()
+    if settings is None:
+        return False
+    max_attempts, initial_delay, max_delay = settings
+
+    task = book_queue.get_task(task_id)
+    if task is None or not _is_auto_retryable(task):
+        return False
+
+    with _auto_retry_lock:
+        retry_number = _auto_retry_counts.get(task_id, 0) + 1
+        if retry_number > max_attempts:
+            return False
+        delay = _auto_retry_delay(retry_number, initial_delay, max_delay)
+        _auto_retry_counts[task_id] = retry_number
+        _auto_retry_due[task_id] = time.monotonic() + delay
+
+    reason = (task.last_error_message or task.status_message or "Download failed").strip()
+    logger.info(
+        "Task %s: download failed (%s); automatic retry %s/%s in %.0fs",
+        task_id,
+        reason,
+        retry_number,
+        max_attempts,
+        delay,
+    )
+    book_queue.update_status_message(
+        task_id,
+        f"{reason} - retry {retry_number}/{max_attempts} in {_format_retry_wait(delay)}",
+    )
+    book_queue.update_status(task_id, QueueStatus.QUEUED)
+    return True
+
+
+def _requeue_due_auto_retries(now: float | None = None) -> None:
+    """Put parked downloads whose backoff delay has passed back into the queue."""
+    now = time.monotonic() if now is None else now
+    with _auto_retry_lock:
+        due = [task_id for task_id, due_at in _auto_retry_due.items() if due_at <= now]
+        for task_id in due:
+            del _auto_retry_due[task_id]
+        retry_numbers = {task_id: _auto_retry_counts.get(task_id, 0) for task_id in due}
+    if not due:
+        return
+
+    for task_id in due:
+        task = book_queue.get_task(task_id)
+        # Cancelled (or dropped from the queue) while it waited.
+        if task is None or book_queue.get_task_status(task_id) != QueueStatus.QUEUED:
+            _clear_auto_retry_state(task_id)
+            continue
+        _clear_task_error_state(task)
+        if not book_queue.enqueue_existing(task_id):
+            _clear_auto_retry_state(task_id)
+            continue
+        logger.info("Task %s: automatic retry %s starting", task_id, retry_numbers[task_id])
+        book_queue.update_status_message(task_id, f"Retrying (retry {retry_numbers[task_id]})")
+
+    if ws_manager:
+        ws_manager.broadcast_status_update(queue_status())
+
+
 def _process_single_download(task_id: str, cancel_flag: Event) -> None:
     """Process a single download job."""
     # Status will be updated through callbacks during download process
@@ -1044,6 +1172,7 @@ def _process_single_download(task_id: str, cancel_flag: Event) -> None:
     _cleanup_progress_tracking(task_id)
 
     if cancel_flag.is_set():
+        _clear_auto_retry_state(task_id)
         book_queue.update_status(task_id, QueueStatus.CANCELLED)
         # Broadcast cancellation
         if ws_manager:
@@ -1051,9 +1180,11 @@ def _process_single_download(task_id: str, cancel_flag: Event) -> None:
         return
 
     if download_path:
+        _clear_auto_retry_state(task_id)
         book_queue.update_download_path(task_id, download_path)
         book_queue.update_status(task_id, QueueStatus.COMPLETE)
-    else:
+    elif not _schedule_auto_retry(task_id):
+        _clear_auto_retry_state(task_id)
         _finalize_download_failure(task_id)
 
     # Broadcast final status (completed or error)
@@ -1191,6 +1322,9 @@ def concurrent_download_loop() -> None:
                 for task_id in _find_stalled_tasks(candidates, current_time):
                     _cancel_stalled_task(task_id)
                     stalled_tasks.add(task_id)
+
+                # Requeue failed downloads whose automatic-retry delay has passed
+                _requeue_due_auto_retries()
 
                 # Start new downloads if we have capacity
                 while len(active_futures) < max_workers:

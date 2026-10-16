@@ -7,6 +7,7 @@ needed. All shelfmark-stateful behaviour lives in source.py/handler.py.
 """
 
 import re
+import time
 from http import HTTPStatus
 from urllib.parse import quote, urlsplit
 
@@ -72,34 +73,49 @@ _METADATA_STOP_LABELS = [
 ]
 
 
-def fetch_page(url: str, timeout: tuple[int, int] = (5, 15)) -> str | None:
+def fetch_page(url: str, timeout: tuple[int, int] = (5, 15), *, attempts: int = 1) -> str | None:
     """GET a libgen page, returning its text on HTTP 200 or None on any failure.
 
     Public (not underscore-prefixed) because handler.py fetches ads.php pages through it
     and tests patch it. Uses the app's proxy/SSL/DNS configuration so egress stays on
     whatever network the container is bound to (the VPN namespace, in the deployed stack).
+
+    ``attempts`` > 1 retries a dropped connection or a 5xx with a short backoff. Timeouts
+    and 429 are not retried: the mirror is overloaded or throttling us, and the caller
+    moves on to the next mirror instead.
     """
     # libgen.li's ads.php returns an empty 200 body to requests without a Referer (an
     # anti-hotlinking check the mirrors added). A same-origin Referer is enough and is
     # harmless for the search page, so send one for every fetch.
     parts = urlsplit(url)
     headers = {**downloader.DOWNLOAD_HEADERS, "Referer": f"{parts.scheme}://{parts.netloc}/"}
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=True,
-            proxies=network.get_proxies(url),
-            verify=network.get_ssl_verify(url),
-        )
-    except requests.exceptions.RequestException as exc:
-        logger.debug("Libgen fetch failed for %s: %s", url, exc)
-        return None
-    if response.status_code != HTTPStatus.OK:
-        logger.debug("Libgen fetch %s returned %s", url, response.status_code)
-        return None
-    return response.text
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                proxies=network.get_proxies(url),
+                verify=network.get_ssl_verify(url),
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.debug("Libgen fetch failed for %s: %s", url, exc)
+            transient = isinstance(exc, downloader.CONNECTION_ERRORS) and not isinstance(
+                exc, requests.exceptions.Timeout
+            )
+        else:
+            if response.status_code == HTTPStatus.OK:
+                return response.text
+            logger.debug("Libgen fetch %s returned %s", url, response.status_code)
+            transient = (
+                response.status_code in downloader.RETRYABLE_CODES
+                and response.status_code != HTTPStatus.TOO_MANY_REQUESTS
+            )
+        if not transient or attempt >= attempts:
+            return None
+        time.sleep(downloader.backoff_delay(attempt))
+    return None
 
 
 def search_libgen(

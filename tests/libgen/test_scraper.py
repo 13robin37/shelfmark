@@ -114,3 +114,60 @@ def test_search_libgen_falls_through_dead_mirror():
 def test_search_libgen_all_mirrors_dead_returns_empty():
     with patch.object(scraper, "fetch_page", return_value=None):
         assert scraper.search_libgen("q", ["https://a", "https://b"], max_results=25) == []
+
+
+def _fetch_with(responses):
+    """Run fetch_page(attempts=2) against a scripted sequence of responses/exceptions."""
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.text = "<html>ok</html>"
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        outcome = responses[len(calls) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return FakeResponse(outcome)
+
+    with (
+        patch.object(scraper.requests, "get", side_effect=fake_get),
+        patch.object(scraper.network, "get_proxies", return_value=None),
+        patch.object(scraper.network, "get_ssl_verify", return_value=True),
+        patch.object(scraper.time, "sleep") as sleep,
+    ):
+        result = scraper.fetch_page("https://libgen.li/ads.php?md5=abc", attempts=2)
+    return result, len(calls), sleep.call_count
+
+
+def test_fetch_page_retries_a_dropped_connection():
+    result, calls, sleeps = _fetch_with([scraper.requests.exceptions.ConnectionError(), 200])
+    assert result == "<html>ok</html>"
+    assert (calls, sleeps) == (2, 1)
+
+
+def test_fetch_page_retries_a_server_error():
+    result, calls, _sleeps = _fetch_with([502, 200])
+    assert result == "<html>ok</html>"
+    assert calls == 2
+
+
+def test_fetch_page_does_not_retry_timeouts_rate_limits_or_client_errors():
+    for first in (scraper.requests.exceptions.ReadTimeout(), 429, 404):
+        result, calls, sleeps = _fetch_with([first, 200])
+        assert result is None
+        assert (calls, sleeps) == (1, 0)
+
+
+def test_fetch_page_defaults_to_a_single_attempt():
+    with (
+        patch.object(
+            scraper.requests, "get", side_effect=scraper.requests.exceptions.ConnectionError()
+        ) as get,
+        patch.object(scraper.network, "get_proxies", return_value=None),
+        patch.object(scraper.network, "get_ssl_verify", return_value=True),
+    ):
+        assert scraper.fetch_page("https://libgen.li/index.php?req=x") is None
+    assert get.call_count == 1

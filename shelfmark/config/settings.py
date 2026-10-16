@@ -1660,18 +1660,67 @@ def download_source_settings() -> list[SettingsField]:
         NumberField(
             key="MAX_RETRY",
             label="Max Retries",
-            description="Maximum retry attempts for failed downloads.",
+            description=(
+                "Maximum attempts for a single page request (search, download and "
+                "bypass pages) before it gives up. File transfers have their own short "
+                "retry; see Automatic Retry below for retrying a whole failed download."
+            ),
             default=10,
             min_value=1,
             max_value=50,
         ),
         NumberField(
             key="DEFAULT_SLEEP",
-            label="Retry Delay (seconds)",
-            description="Wait time between download retry attempts.",
+            label="Bypass Browser Startup Delay (seconds)",
+            description="Wait time after the built-in bypass browser starts before it is used.",
             default=5,
             min_value=1,
             max_value=60,
+        ),
+        HeadingField(
+            key="auto_retry_heading",
+            title="Automatic Retry",
+            description=(
+                "Retry failed Anna's Archive / Direct Download and Libgen downloads on their "
+                "own, waiting longer before each new attempt (exponential backoff)."
+            ),
+        ),
+        CheckboxField(
+            key="AUTO_RETRY_FAILED_DOWNLOADS",
+            label="Automatically Retry Failed Downloads",
+            description=(
+                "When a download fails, queue it again after a delay instead of marking it "
+                "failed right away. Failures after the file was downloaded (post-processing) "
+                "are not retried."
+            ),
+            default=False,
+        ),
+        NumberField(
+            key="AUTO_RETRY_MAX_ATTEMPTS",
+            label="Max Automatic Retries",
+            description="How many times a failed download is retried before it is marked failed.",
+            default=3,
+            min_value=1,
+            max_value=10,
+            show_when={"field": "AUTO_RETRY_FAILED_DOWNLOADS", "value": True},
+        ),
+        NumberField(
+            key="AUTO_RETRY_INITIAL_DELAY",
+            label="First Retry Delay (seconds)",
+            description="Wait before the first retry. The wait doubles for every further retry.",
+            default=60,
+            min_value=10,
+            max_value=3600,
+            show_when={"field": "AUTO_RETRY_FAILED_DOWNLOADS", "value": True},
+        ),
+        NumberField(
+            key="AUTO_RETRY_MAX_DELAY",
+            label="Max Retry Delay (seconds)",
+            description="Upper limit for the wait between two retries.",
+            default=1800,
+            min_value=60,
+            max_value=86400,
+            show_when={"field": "AUTO_RETRY_FAILED_DOWNLOADS", "value": True},
         ),
         NumberField(
             key="RELEASE_SEARCH_TIMEOUT",

@@ -2338,8 +2338,12 @@ Enable Moly.hu as a metadata provider for book searches
 | `AA_DONATOR_KEY` | Enables fast download access on AA. Get this from your donator account page. | string (secret) | _none_ |
 | `FAST_SOURCES_DISPLAY` | Always tried first, no waiting or bypass required. | JSON array | _see UI for defaults_ |
 | `SOURCE_PRIORITY` | Fallback sources, may have waiting. Requires bypasser. Drag to reorder. | JSON array | _see UI for defaults_ |
-| `MAX_RETRY` | Maximum retry attempts for failed downloads. | number | `10` |
-| `DEFAULT_SLEEP` | Wait time between download retry attempts. | number | `5` |
+| `MAX_RETRY` | Maximum attempts for a single page request (search, download and bypass pages) before it gives up. File transfers have their own short retry; see Automatic Retry below for retrying a whole failed download. | number | `10` |
+| `DEFAULT_SLEEP` | Wait time after the built-in bypass browser starts before it is used. | number | `5` |
+| `AUTO_RETRY_FAILED_DOWNLOADS` | When a download fails, queue it again after a delay instead of marking it failed right away. Failures after the file was downloaded (post-processing) are not retried. | boolean | `false` |
+| `AUTO_RETRY_MAX_ATTEMPTS` | How many times a failed download is retried before it is marked failed. | number | `3` |
+| `AUTO_RETRY_INITIAL_DELAY` | Wait before the first retry. The wait doubles for every further retry. | number | `60` |
+| `AUTO_RETRY_MAX_DELAY` | Upper limit for the wait between two retries. | number | `1800` |
 | `RELEASE_SEARCH_TIMEOUT` | How long one release search may run before it gives up and reports why. A first search on a cold start pays for a browser solve, so leave room for one. If you use a reverse proxy, its read timeout should be at least this high or it will cut the search off with a 504 first. | number | `300` |
 | `AA_CONTENT_TYPE_ROUTING` | Override destination based on content type metadata. | boolean | `false` |
 | `AA_CONTENT_TYPE_DIR_FICTION` | Fiction Books | string | _none_ |
@@ -2403,7 +2407,7 @@ Fallback sources, may have waiting. Requires bypasser. Drag to reorder.
 
 **Max Retries**
 
-Maximum retry attempts for failed downloads.
+Maximum attempts for a single page request (search, download and bypass pages) before it gives up. File transfers have their own short retry; see Automatic Retry below for retrying a whole failed download.
 
 - **Type:** number
 - **Default:** `10`
@@ -2411,13 +2415,52 @@ Maximum retry attempts for failed downloads.
 
 #### `DEFAULT_SLEEP`
 
-**Retry Delay (seconds)**
+**Bypass Browser Startup Delay (seconds)**
 
-Wait time between download retry attempts.
+Wait time after the built-in bypass browser starts before it is used.
 
 - **Type:** number
 - **Default:** `5`
 - **Constraints:** min: 1, max: 60
+
+#### `AUTO_RETRY_FAILED_DOWNLOADS`
+
+**Automatically Retry Failed Downloads**
+
+When a download fails, queue it again after a delay instead of marking it failed right away. Failures after the file was downloaded (post-processing) are not retried.
+
+- **Type:** boolean
+- **Default:** `false`
+
+#### `AUTO_RETRY_MAX_ATTEMPTS`
+
+**Max Automatic Retries**
+
+How many times a failed download is retried before it is marked failed.
+
+- **Type:** number
+- **Default:** `3`
+- **Constraints:** min: 1, max: 10
+
+#### `AUTO_RETRY_INITIAL_DELAY`
+
+**First Retry Delay (seconds)**
+
+Wait before the first retry. The wait doubles for every further retry.
+
+- **Type:** number
+- **Default:** `60`
+- **Constraints:** min: 10, max: 3600
+
+#### `AUTO_RETRY_MAX_DELAY`
+
+**Max Retry Delay (seconds)**
+
+Upper limit for the wait between two retries.
+
+- **Type:** number
+- **Default:** `1800`
+- **Constraints:** min: 60, max: 86400
 
 #### `RELEASE_SEARCH_TIMEOUT`
 

@@ -188,7 +188,9 @@ REQUEST_TIMEOUT = (5, 10)  # (connect, read)
 MAX_DOWNLOAD_RETRIES = 2
 MAX_RESUME_ATTEMPTS = 3
 
-RETRYABLE_CODES = (429, 500, 502, 503, 504)
+# 408 and Cloudflare's 520-524 (origin unreachable / timed out behind the CDN) are as
+# transient as a plain 502/504.
+RETRYABLE_CODES = (408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524)
 CONNECTION_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
@@ -219,8 +221,8 @@ def parse_size_string(size: str) -> float | None:
         return None
 
 
-def _backoff_delay(attempt: int, base: float = 0.25, cap: float = 3.0) -> float:
-    """Exponential backoff with jitter."""
+def backoff_delay(attempt: int, base: float = 0.25, cap: float = 3.0) -> float:
+    """Exponential backoff with jitter for the n-th (1-based) retry of a request."""
     return min(cap, base * (2 ** (attempt - 1))) + _RNG.random() * base
 
 
@@ -841,6 +843,16 @@ def html_get_page(
                     handshake_cookies.clear()
                     continue
 
+            # Any other 4xx is the server rejecting this request; asking again does not
+            # change its answer, it only burns the rest of the retry budget.
+            if (
+                status is not None
+                and HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR
+                and status not in RETRYABLE_CODES
+            ):
+                logger.warning("HTTP %s, not retrying: %s", status, current_url)
+                return _fail(f"The server returned HTTP {status} for {current_url}.", current_url)
+
             # Retry with backoff
             if attempt < retry_limit:
                 logger.warning(
@@ -851,7 +863,7 @@ def html_get_page(
                     type(e).__name__,
                     e,
                 )
-                time.sleep(_backoff_delay(attempt))
+                time.sleep(backoff_delay(attempt))
             else:
                 logger.exception("Giving up after %s attempts: %s", retry_limit, current_url)
 
@@ -1016,7 +1028,7 @@ def download_url(
 
             logger.warning("Download error: %s", type(e).__name__)
             if attempt < MAX_DOWNLOAD_RETRIES - 1:
-                time.sleep(_backoff_delay(attempt + 1))
+                time.sleep(backoff_delay(attempt + 1))
             attempt += 1
         else:
             return buffer
@@ -1060,7 +1072,7 @@ def _try_resume(
             attempt + 1,
             MAX_RESUME_ATTEMPTS,
         )
-        time.sleep(_backoff_delay(attempt + 1, base=0.5, cap=5.0))
+        time.sleep(backoff_delay(attempt + 1, base=0.5, cap=5.0))
 
         try:
             # Try with CF cookies/UA if available
