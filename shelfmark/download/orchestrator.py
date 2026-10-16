@@ -705,6 +705,7 @@ def _task_to_dict(
         "username": task.username,
         "request_id": task.request_id,
         "retry_available": can_retry_download_task(task, retry_status),
+        "auto_retry_pending": _is_auto_retry_pending(task.task_id),
     }
 
 
@@ -1092,6 +1093,12 @@ def _is_auto_retryable(task: DownloadTask) -> bool:
     )
 
 
+def _is_auto_retry_pending(task_id: str) -> bool:
+    """True while a failed download is parked waiting for its automatic retry."""
+    with _auto_retry_lock:
+        return task_id in _auto_retry_due
+
+
 def _clear_auto_retry_state(task_id: str) -> None:
     with _auto_retry_lock:
         _auto_retry_counts.pop(task_id, None)
@@ -1099,7 +1106,10 @@ def _clear_auto_retry_state(task_id: str) -> None:
 
 
 def _schedule_auto_retry(task_id: str) -> bool:
-    """Park a failed download for a delayed retry. False when it should fail now."""
+    """Park a failed download for a delayed retry. False when it should fail now.
+
+    True also covers a task that was cancelled in the meantime: it keeps that status.
+    """
     settings = _auto_retry_settings()
     if settings is None:
         return False
@@ -1118,6 +1128,10 @@ def _schedule_auto_retry(task_id: str) -> bool:
         _auto_retry_due[task_id] = time.monotonic() + delay
 
     reason = (task.last_error_message or task.status_message or "Download failed").strip()
+    if not book_queue.park(task_id):
+        # Cancelled after the attempt failed: keep the cancel instead of retrying.
+        _clear_auto_retry_state(task_id)
+        return True
     logger.info(
         "Task %s: download failed (%s); automatic retry %s/%s in %.0fs",
         task_id,
@@ -1130,7 +1144,6 @@ def _schedule_auto_retry(task_id: str) -> bool:
         task_id,
         f"{reason} - retry {retry_number}/{max_attempts} in {_format_retry_wait(delay)}",
     )
-    book_queue.update_status(task_id, QueueStatus.QUEUED)
     return True
 
 
@@ -1139,24 +1152,25 @@ def _requeue_due_auto_retries(now: float | None = None) -> None:
     now = time.monotonic() if now is None else now
     with _auto_retry_lock:
         due = [task_id for task_id, due_at in _auto_retry_due.items() if due_at <= now]
-        for task_id in due:
-            del _auto_retry_due[task_id]
-        retry_numbers = {task_id: _auto_retry_counts.get(task_id, 0) for task_id in due}
     if not due:
         return
 
     for task_id in due:
+        with _auto_retry_lock:
+            # Taken off one at a time, so a failure on one task leaves the rest due.
+            if _auto_retry_due.pop(task_id, None) is None:
+                continue
+            retry_number = _auto_retry_counts.get(task_id, 0)
         task = book_queue.get_task(task_id)
-        # Cancelled (or dropped from the queue) while it waited.
-        if task is None or book_queue.get_task_status(task_id) != QueueStatus.QUEUED:
+        # Requeue only while still parked: cancelled or dropped tasks stay as they are.
+        if task is None or not book_queue.enqueue_existing(
+            task_id, only_if_status=QueueStatus.QUEUED
+        ):
             _clear_auto_retry_state(task_id)
             continue
         _clear_task_error_state(task)
-        if not book_queue.enqueue_existing(task_id):
-            _clear_auto_retry_state(task_id)
-            continue
-        logger.info("Task %s: automatic retry %s starting", task_id, retry_numbers[task_id])
-        book_queue.update_status_message(task_id, f"Retrying (retry {retry_numbers[task_id]})")
+        logger.info("Task %s: automatic retry %s starting", task_id, retry_number)
+        book_queue.update_status_message(task_id, f"Retrying (retry {retry_number})")
 
     if ws_manager:
         ws_manager.broadcast_status_update(queue_status())
@@ -1274,6 +1288,7 @@ def concurrent_download_loop() -> None:
                     stalled_tasks.discard(task_id)
                     if future.cancelled():
                         _cleanup_progress_tracking(task_id)
+                        _clear_auto_retry_state(task_id)
                         if cancel_flag.is_set():
                             logger.info("Download cancelled: %s", task_id)
                             book_queue.update_status(task_id, QueueStatus.CANCELLED)
@@ -1296,6 +1311,7 @@ def concurrent_download_loop() -> None:
                         continue
 
                     _cleanup_progress_tracking(task_id)
+                    _clear_auto_retry_state(task_id)
                     if cancel_flag.is_set():
                         logger.info("Download cancelled: %s", task_id)
                         book_queue.update_status(task_id, QueueStatus.CANCELLED)

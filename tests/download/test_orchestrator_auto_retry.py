@@ -188,3 +188,60 @@ def test_manual_retry_resets_the_automatic_budget(orchestrator, monkeypatch):
 
     assert ok is True
     assert orchestrator._auto_retry_counts == {}
+
+
+def test_a_cancel_landing_before_parking_wins(orchestrator, monkeypatch):
+    task, queue, handler, terminal = _setup(orchestrator, monkeypatch)
+
+    def _download(_task, _cancel_flag, _progress_callback, _status_callback):
+        # The user cancels after the attempt failed but before the flag is checked again.
+        queue.cancel_download(task.task_id)
+        return None
+
+    handler.download.side_effect = _download
+    cancel_flag = Event()  # the worker's own flag was not the one set
+    orchestrator._download_task(task.task_id, cancel_flag)
+    orchestrator._cleanup_progress_tracking(task.task_id)
+
+    assert orchestrator._schedule_auto_retry(task.task_id) is True
+    assert queue.get_task_status(task.task_id) == QueueStatus.CANCELLED
+    assert terminal == [QueueStatus.CANCELLED]
+    assert orchestrator._auto_retry_due == {}
+
+
+def test_a_cancel_landing_before_requeue_wins(orchestrator, monkeypatch):
+    task, queue, _handler, _terminal = _setup(orchestrator, monkeypatch)
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: 0.0)
+    assert _fail_once(orchestrator, queue, task) == QueueStatus.QUEUED
+
+    real_enqueue = queue.enqueue_existing
+
+    def _cancel_first(task_id, **kwargs):
+        queue.cancel_download(task_id)
+        return real_enqueue(task_id, **kwargs)
+
+    monkeypatch.setattr(queue, "enqueue_existing", _cancel_first)
+    orchestrator._requeue_due_auto_retries(now=10_000.0)
+
+    assert queue.get_task_status(task.task_id) == QueueStatus.CANCELLED
+    assert queue.get_next() is None
+
+
+def test_a_parked_task_is_not_reported_as_active(orchestrator, monkeypatch):
+    task, queue, _handler, _terminal = _setup(orchestrator, monkeypatch)
+    assert queue.get_active_downloads() == [task.task_id]
+
+    assert _fail_once(orchestrator, queue, task) == QueueStatus.QUEUED
+    assert queue.get_active_downloads() == []
+    assert orchestrator._task_to_dict(task)["auto_retry_pending"] is True
+
+
+def test_a_parked_task_keeps_a_new_priority_for_its_requeue(orchestrator, monkeypatch):
+    task, queue, _handler, _terminal = _setup(orchestrator, monkeypatch)
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: 0.0)
+    assert _fail_once(orchestrator, queue, task) == QueueStatus.QUEUED
+
+    assert queue.set_priority(task.task_id, -5) is True
+    orchestrator._requeue_due_auto_retries(now=10_000.0)
+
+    assert queue.get_queue_order()[0]["priority"] == -5

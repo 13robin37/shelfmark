@@ -299,18 +299,34 @@ class BookQueue:
             for item in temp_items:
                 self._queue.put(item)
 
+            # A task parked for a delayed retry is QUEUED but not in the queue yet; its
+            # priority is applied when it is requeued.
+            if not found and task_id not in self._active_downloads and task_id in self._task_data:
+                self._task_data[task_id].priority = new_priority
+                found = True
+
             return found
 
-    def enqueue_existing(self, task_id: str, *, priority: int | None = None) -> bool:
+    def enqueue_existing(
+        self,
+        task_id: str,
+        *,
+        priority: int | None = None,
+        only_if_status: QueueStatus | None = None,
+    ) -> bool:
         """Requeue an existing task regardless of current status.
 
         This is used for retries where task metadata should be preserved.
+        ``only_if_status`` refuses the requeue unless the task is still in that status,
+        checked under the lock so a concurrent cancel cannot be undone.
         """
         hook: Callable[[str, DownloadTask], None] | None = None
         hook_task: DownloadTask | None = None
         with self._lock:
             task = self._task_data.get(task_id)
             if task is None:
+                return False
+            if only_if_status is not None and self._status.get(task_id) != only_if_status:
                 return False
 
             if priority is not None:
@@ -342,6 +358,24 @@ class BookQueue:
             except _QUEUE_HOOK_ERRORS as exc:
                 logger.warning("Queue hook failed while requeueing task %s: %s", task_id, exc)
         return True
+
+    def park(self, task_id: str) -> bool:
+        """Return a task that just failed to QUEUED without putting it in the queue.
+
+        Used for a delayed automatic retry: the caller requeues it later with
+        ``enqueue_existing``. Refused once the task reached a terminal status, so a
+        cancel that landed between the failure and this call wins.
+        """
+        with self._lock:
+            status = self._status.get(task_id)
+            if task_id not in self._task_data or status is None:
+                return False
+            if status in TERMINAL_QUEUE_STATUSES:
+                return False
+            self._active_downloads.pop(task_id, None)
+            self._cancel_flags.pop(task_id, None)
+            self._update_status(task_id, QueueStatus.QUEUED)
+            return True
 
     def reorder_queue(self, task_priorities: dict[str, int]) -> bool:
         """Bulk reorder queue by mapping task_id to new priority."""
