@@ -299,8 +299,7 @@ class BookQueue:
             for item in temp_items:
                 self._queue.put(item)
 
-            # A task parked for a delayed retry is QUEUED but not in the queue yet; its
-            # priority is applied when it is requeued.
+            # Parked for an automatic retry: the priority applies when it is requeued.
             if not found and task_id not in self._active_downloads and task_id in self._task_data:
                 self._task_data[task_id].priority = new_priority
                 found = True
@@ -317,8 +316,7 @@ class BookQueue:
         """Requeue an existing task regardless of current status.
 
         This is used for retries where task metadata should be preserved.
-        ``only_if_status`` refuses the requeue unless the task is still in that status,
-        checked under the lock so a concurrent cancel cannot be undone.
+        ``only_if_status`` refuses the requeue unless the task is still in that status.
         """
         hook: Callable[[str, DownloadTask], None] | None = None
         hook_task: DownloadTask | None = None
@@ -360,12 +358,7 @@ class BookQueue:
         return True
 
     def park(self, task_id: str) -> bool:
-        """Return a task that just failed to QUEUED without putting it in the queue.
-
-        Used for a delayed automatic retry: the caller requeues it later with
-        ``enqueue_existing``. Refused once the task reached a terminal status, so a
-        cancel that landed between the failure and this call wins.
-        """
+        """Set a failed task back to QUEUED without queueing it, unless it is terminal."""
         with self._lock:
             status = self._status.get(task_id)
             if task_id not in self._task_data or status is None:

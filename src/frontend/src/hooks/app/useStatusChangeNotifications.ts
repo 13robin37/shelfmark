@@ -37,7 +37,6 @@ export const useStatusChangeNotifications = ({
       let shouldOpenDownloadsSidebar = false;
       Object.keys(currQueued).forEach((bookId) => {
         const book = currQueued[bookId];
-        // A failed download parked for an automatic retry is not a new queue entry.
         if (!prevQueued[bookId] && !book.auto_retry_pending) {
           showToast(`${book.title || 'Book'} added to queue`, 'info');
           if (config?.auto_open_downloads_sidebar !== false) {

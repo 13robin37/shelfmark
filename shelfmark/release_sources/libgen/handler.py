@@ -27,8 +27,6 @@ logger = setup_logger(__name__)
 # Files under this size are almost certainly an error/challenge page, not a book. Same
 # threshold direct_download uses; duplicated to keep the package self-contained.
 _MIN_VALID_FILE_SIZE = 10 * 1024
-# One retry for a dropped connection or 5xx on the ads.php page before trying the next
-# mirror - with a single mirror configured, a blip there used to fail the whole download.
 _ADS_PAGE_ATTEMPTS = 2
 
 

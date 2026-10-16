@@ -188,8 +188,7 @@ REQUEST_TIMEOUT = (5, 10)  # (connect, read)
 MAX_DOWNLOAD_RETRIES = 2
 MAX_RESUME_ATTEMPTS = 3
 
-# 408 and Cloudflare's 520-524 (origin unreachable / timed out behind the CDN) are as
-# transient as a plain 502/504.
+# 520-524: Cloudflare cannot reach the origin, as transient as a 502/504.
 RETRYABLE_CODES = (408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524)
 CONNECTION_ERRORS = (
     requests.exceptions.ConnectionError,
@@ -222,7 +221,7 @@ def parse_size_string(size: str) -> float | None:
 
 
 def backoff_delay(attempt: int, base: float = 0.25, cap: float = 3.0) -> float:
-    """Exponential backoff with jitter for the n-th (1-based) retry of a request."""
+    """Exponential backoff with jitter."""
     return min(cap, base * (2 ** (attempt - 1))) + _RNG.random() * base
 
 
@@ -843,8 +842,7 @@ def html_get_page(
                     handshake_cookies.clear()
                     continue
 
-            # Any other 4xx is the server rejecting this request; asking again does not
-            # change its answer, it only burns the rest of the retry budget.
+            # Other 4xx answers do not change on a retry.
             if (
                 status is not None
                 and HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR

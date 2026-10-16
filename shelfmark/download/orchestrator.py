@@ -84,18 +84,13 @@ _PROGRESS_BROADCAST_START_PERCENT = 1
 _PROGRESS_BROADCAST_COMPLETE_PERCENT = 99
 _PROGRESS_BROADCAST_MIN_DELTA = 10
 
-# Opt-in automatic retry (AUTO_RETRY_FAILED_DOWNLOADS). A failed download is parked in
-# QUEUED - but outside the priority queue - until its backoff delay has passed, and the
-# coordinator loop requeues it then. Only the download phase of these sources is
-# retried: their failures are mostly mirrors that are down, throttled or slow, which
-# time heals. Post-processing failures and a disabled source do not heal by waiting.
-# In-memory only, like the queue itself.
+# Automatic retry (AUTO_RETRY_FAILED_DOWNLOADS): a failed download waits in QUEUED, outside
+# the priority queue, until the coordinator loop requeues it after its backoff delay.
 _AUTO_RETRY_SOURCES = frozenset({"direct_download", "libgen"})
 _AUTO_RETRY_SKIP_ERROR_TYPES = frozenset({"SourceUnavailable"})
 _AUTO_RETRY_DEFAULT_MAX_ATTEMPTS = 3
 _AUTO_RETRY_DEFAULT_INITIAL_DELAY = 60.0
 _AUTO_RETRY_DEFAULT_MAX_DELAY = 1800.0
-# +/- spread applied to every delay so tasks that failed together do not retry together.
 _AUTO_RETRY_JITTER = 0.1
 _auto_retry_lock = Lock()
 _auto_retry_counts: dict[str, int] = {}  # retries already scheduled per task
@@ -993,7 +988,6 @@ def retry_download(book_id: str) -> tuple[bool, str | None]:
     task.last_error_message = None
     task.last_error_type = None
     task.priority = -10
-    # A manual retry starts a fresh automatic-retry budget.
     _clear_auto_retry_state(book_id)
 
     if not book_queue.enqueue_existing(book_id, priority=-10):
@@ -1094,7 +1088,6 @@ def _is_auto_retryable(task: DownloadTask) -> bool:
 
 
 def _is_auto_retry_pending(task_id: str) -> bool:
-    """True while a failed download is parked waiting for its automatic retry."""
     with _auto_retry_lock:
         return task_id in _auto_retry_due
 
@@ -1106,10 +1099,7 @@ def _clear_auto_retry_state(task_id: str) -> None:
 
 
 def _schedule_auto_retry(task_id: str) -> bool:
-    """Park a failed download for a delayed retry. False when it should fail now.
-
-    True also covers a task that was cancelled in the meantime: it keeps that status.
-    """
+    """Park a failed download for a delayed retry. False when it should fail now."""
     settings = _auto_retry_settings()
     if settings is None:
         return False
@@ -1127,11 +1117,11 @@ def _schedule_auto_retry(task_id: str) -> bool:
         _auto_retry_counts[task_id] = retry_number
         _auto_retry_due[task_id] = time.monotonic() + delay
 
-    reason = (task.last_error_message or task.status_message or "Download failed").strip()
     if not book_queue.park(task_id):
-        # Cancelled after the attempt failed: keep the cancel instead of retrying.
+        # Cancelled after the attempt failed; the cancel stands.
         _clear_auto_retry_state(task_id)
         return True
+    reason = (task.last_error_message or task.status_message or "Download failed").strip()
     logger.info(
         "Task %s: download failed (%s); automatic retry %s/%s in %.0fs",
         task_id,
@@ -1157,12 +1147,10 @@ def _requeue_due_auto_retries(now: float | None = None) -> None:
 
     for task_id in due:
         with _auto_retry_lock:
-            # Taken off one at a time, so a failure on one task leaves the rest due.
             if _auto_retry_due.pop(task_id, None) is None:
                 continue
             retry_number = _auto_retry_counts.get(task_id, 0)
         task = book_queue.get_task(task_id)
-        # Requeue only while still parked: cancelled or dropped tasks stay as they are.
         if task is None or not book_queue.enqueue_existing(
             task_id, only_if_status=QueueStatus.QUEUED
         ):
@@ -1339,7 +1327,6 @@ def concurrent_download_loop() -> None:
                     _cancel_stalled_task(task_id)
                     stalled_tasks.add(task_id)
 
-                # Requeue failed downloads whose automatic-retry delay has passed
                 _requeue_due_auto_retries()
 
                 # Start new downloads if we have capacity

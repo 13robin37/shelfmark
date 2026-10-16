@@ -57,7 +57,7 @@ export interface Book {
   titles_by_language?: Record<string, string>;
   username?: string;
   retry_available?: boolean;
-  auto_retry_pending?: boolean; // Failed download parked for an automatic retry
+  auto_retry_pending?: boolean;
   downloads?: number;
   extra?: Record<string, unknown>;
 }

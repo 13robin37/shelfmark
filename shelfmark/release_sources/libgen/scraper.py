@@ -80,9 +80,8 @@ def fetch_page(url: str, timeout: tuple[int, int] = (5, 15), *, attempts: int = 
     and tests patch it. Uses the app's proxy/SSL/DNS configuration so egress stays on
     whatever network the container is bound to (the VPN namespace, in the deployed stack).
 
-    ``attempts`` > 1 retries a dropped connection or a 5xx with a short backoff. Timeouts
-    and 429 are not retried: the mirror is overloaded or throttling us, and the caller
-    moves on to the next mirror instead.
+    ``attempts`` > 1 retries a dropped connection or a 5xx; timeouts and 429 are left to
+    the caller's mirror fallback.
     """
     # libgen.li's ads.php returns an empty 200 body to requests without a Referer (an
     # anti-hotlinking check the mirrors added). A same-origin Referer is enough and is
