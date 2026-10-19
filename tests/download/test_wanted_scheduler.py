@@ -1170,3 +1170,73 @@ def test_the_found_notice_skips_subscribers_the_source_cannot_serve(env):
 
     assert env.queued[-1][0]["source"] == "direct_download"
     assert sent == [env.bob["id"]]
+
+
+class _FeedSource:
+    def __init__(self, releases):
+        self.releases = releases
+        self.reads = 0
+
+    def recent_releases(self, content_type):
+        assert content_type == "ebook"
+        self.reads += 1
+        return list(self.releases)
+
+
+@pytest.fixture
+def feed(env):
+    source = _FeedSource([_release("p-1", source="prowlarr", title="Frank Herbert - Dune")])
+    sources = [
+        *SOURCES,
+        {"name": "prowlarr", "enabled": True, "supported_content_types": ["ebook"]},
+    ]
+    env.results = {}
+    with (
+        patch.object(ws, "wanted_sources", return_value=["direct_download", "prowlarr"]),
+        patch("shelfmark.release_sources.list_available_sources", return_value=sources),
+        patch("shelfmark.release_sources.get_source", return_value=source),
+        patch.object(ws, "feed_interval_minutes", return_value=15.0),
+    ):
+        yield source
+
+
+def test_a_release_in_a_feed_is_downloaded_for_a_waiting_bookmark(env, feed):
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+
+    env.scheduler.tick()
+
+    assert env.queued[-1][0]["source_id"] == "p-1"
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+    assert len(env.scheduler._searches) == 0
+
+
+def test_feeds_are_read_once_per_interval_and_each_release_matched_once(env, feed):
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+    env.scheduler.tick()
+    env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
+    env.scheduler.tick()
+    assert feed.reads == 1
+
+    env.scheduler._feed_checked_at -= 15 * 60
+    env.service.update_item(wanted_id, state=STATE_WAITING, current_task_id=None)
+    env.scheduler.tick()
+
+    assert feed.reads == 2
+    assert [payload["source_id"] for payload, _, _ in env.queued] == ["p-1"]
+
+
+def test_feeds_can_be_switched_off(env, feed):
+    env.add()
+    with patch.object(ws, "feed_interval_minutes", return_value=0.0):
+        env.scheduler.tick()
+    assert feed.reads == 0
+
+
+def test_feeds_skip_books_not_released_yet(env, feed):
+    wanted_id = env.add(release_date="2999-03-12")
+    env.scheduler.tick()
+
+    assert feed.reads == 0
+    assert env.item(wanted_id)["state"] == STATE_WAITING

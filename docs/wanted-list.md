@@ -23,6 +23,8 @@ The eye only appears for ebooks from a metadata provider, and only for users who
 5. A book that is not out yet is not searched before the day before its release date, when the metadata provider knows it (Hardcover, Open Library, Google Books). The list shows when it comes out.
 6. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading for users whose downloads go to a folder. Users receiving books by email or in Grimmory still get it delivered.
 
+Prowlarr and Newznab indexers are also watched through their feeds (every **Indexer Feed Interval**, default 15 minutes): their newest releases are matched against every waiting bookmark, so a new release is picked up within minutes. Reading the feeds costs one request per indexer, however many books are bookmarked, and does not count as a search.
+
 Background searches give way to searches users run themselves and are capped by **Max Searches per Hour**. IRC is off by default because its results are cached for 30 days.
 
 Switching the wanted list off stops new searches. Downloads already running finish and are recorded; bookmarks are kept for when it is switched on again.

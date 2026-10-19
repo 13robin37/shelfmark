@@ -421,6 +421,11 @@ class ReleaseSource(ABC):
         """Whether source-native browse results already represent concrete releases."""
         return False
 
+    def recent_releases(self, content_type: str = "ebook") -> list[Release] | None:
+        """The newest releases of the source's feeds, or None when it has no feed."""
+        del content_type
+        return None
+
     def get_destination_override(self, task: DownloadTask) -> Path | None:
         """Return a source-specific destination override for a queued download."""
         return None

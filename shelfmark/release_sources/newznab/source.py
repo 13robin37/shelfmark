@@ -469,6 +469,21 @@ class NewznabSource(ReleaseSource):
 
         return results
 
+    def recent_releases(self, content_type: str = "ebook") -> list[Release] | None:
+        """The newest releases of every configured indexer's feed."""
+        clients = self._get_clients()
+        if not clients:
+            return None
+        categories = _configured_categories(content_type)
+        results: list[dict] = []
+        for connection in clients:
+            for raw_result in connection.client.recent(categories=categories):
+                result = dict(raw_result)
+                result["indexer"] = result.get("indexer") or connection.name
+                result["_newznab_connection_id"] = connection.connection_id
+                results.append(result)
+        return [_newznab_result_to_release(r, content_type, categories) for r in results]
+
     def is_available(self) -> bool:
         if not config.get("NEWZNAB_ENABLED", False):
             return False

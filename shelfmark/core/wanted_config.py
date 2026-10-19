@@ -9,6 +9,7 @@ from shelfmark.core.request_helpers import coerce_bool
 
 DEFAULT_BACKOFF_HOURS: tuple[float, ...] = (1.0, 6.0, 24.0)
 DEFAULT_MAX_SEARCHES_PER_HOUR = 6
+DEFAULT_FEED_INTERVAL_MINUTES = 15
 _DEFAULT_SOURCES: tuple[tuple[str, bool], ...] = (
     ("direct_download", True),
     ("libgen", True),
@@ -114,6 +115,16 @@ def backoff_hours() -> tuple[float, ...]:
         if parsed > 0:
             hours.append(parsed)
     return tuple(hours) or DEFAULT_BACKOFF_HOURS
+
+
+def feed_interval_minutes() -> float:
+    """Minutes between reads of the indexers' feeds; 0 switches them off."""
+    value = config.get("WANTED_FEED_INTERVAL_MINUTES", DEFAULT_FEED_INTERVAL_MINUTES)
+    try:
+        parsed = float(str(value))
+    except ValueError:
+        return float(DEFAULT_FEED_INTERVAL_MINUTES)
+    return max(parsed, 0.0) if parsed == parsed else float(DEFAULT_FEED_INTERVAL_MINUTES)
 
 
 def max_searches_per_hour() -> int:

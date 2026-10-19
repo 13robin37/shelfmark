@@ -409,9 +409,6 @@ class ProwlarrClient:
         if not query:
             return []
 
-        endpoint = f"/api/v1/indexer/{int(indexer_id)}/newznab"
-        url = self.base_url + endpoint
-
         params: dict[str, Any] = {
             "t": search_type,
             "q": query,
@@ -420,6 +417,25 @@ class ProwlarrClient:
         }
         if categories:
             params["cat"] = ",".join(str(c) for c in categories)
+        return self._torznab_get(indexer_id, params)
+
+    def torznab_recent(
+        self, *, indexer_id: int, categories: list[int] | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """The newest releases of one indexer: a search without a query is its RSS feed.
+
+        Raises:
+            ProwlarrSearchError: The feed could not be read.
+
+        """
+        params: dict[str, Any] = {"t": "search", "limit": limit}
+        if categories:
+            params["cat"] = ",".join(str(c) for c in categories)
+        return self._torznab_get(indexer_id, params)
+
+    def _torznab_get(self, indexer_id: int, params: dict[str, Any]) -> list[dict[str, Any]]:
+        endpoint = f"/api/v1/indexer/{int(indexer_id)}/newznab"
+        url = self.base_url + endpoint
 
         logger.debug("Prowlarr API: GET %s (torznab)", url)
 

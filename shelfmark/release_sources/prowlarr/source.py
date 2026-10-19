@@ -1380,6 +1380,56 @@ class ProwlarrSource(ReleaseSource):
                 raise SourceUnavailableError(msg)
             return results
 
+    def recent_releases(self, content_type: str = "ebook") -> list[Release] | None:
+        """The newest releases of the selected indexers' feeds."""
+        client = self._get_client()
+        if client is None:
+            return None
+        categories = [3030] if content_type == "audiobook" else [7000]
+        try:
+            enabled_indexers = client.get_enabled_indexers_detailed(raise_on_error=True)
+        except _PROWLARR_REQUEST_ERRORS as e:
+            logger.warning("Prowlarr feeds: could not reach Prowlarr: %s", e)
+            return []
+        indexer_ids = _drop_unknown_indexer_ids(self._get_selected_indexer_ids(), enabled_indexers)
+        indexer_priority = _build_indexer_priority(enabled_indexers)
+        enriched = set(
+            client.get_enriched_indexer_ids(restrict_to=indexer_ids, indexers=enabled_indexers)
+        )
+        try:
+            disabled_indexers = client.get_disabled_indexers()
+        except _PROWLARR_SOURCE_ERRORS as e:
+            logger.warning("Failed to load Prowlarr indexer status: %s", e)
+            disabled_indexers = {}
+        seed_settings = (
+            _fetch_indexer_seed_settings(client, indexer_ids)
+            if config.get("PROWLARR_USE_SEED_PREFERENCES", False)
+            else {}
+        )
+        raw: list[dict] = []
+        for indexer_id in self._get_search_indexer_ids(client, indexer_ids, categories):
+            if indexer_id in disabled_indexers:
+                continue
+            try:
+                raw.extend(client.torznab_recent(indexer_id=indexer_id, categories=categories))
+            except ProwlarrSearchError as e:
+                logger.debug("Prowlarr feed of indexer %s failed: %s", indexer_id, e)
+        if config.get("PROWLARR_COLLAPSE_DUPLICATES", True):
+            raw = _collapse_duplicate_indexer_results(raw, indexer_priority)
+        releases: list[Release] = []
+        for result in raw:
+            result_with_seed = _apply_indexer_seed_settings(result, seed_settings)
+            idx_id = _coerce_indexer_id(result_with_seed.get("indexerId"))
+            release = _prowlarr_result_to_release(
+                result_with_seed,
+                content_type,
+                enable_format_detection=idx_id is not None and idx_id in enriched,
+            )
+            if idx_id is not None and idx_id in indexer_priority:
+                release.extra["indexer_priority"] = indexer_priority[idx_id]
+            releases.append(release)
+        return releases
+
     def is_available(self) -> bool:
         """Check if Prowlarr is enabled and configured."""
         if not config.get("PROWLARR_ENABLED", False):

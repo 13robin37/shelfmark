@@ -112,13 +112,18 @@ class NewznabClient:
         """
         if not query:
             return []
+        return self._search_params(
+            {"t": search_type, "q": query, "limit": limit, "offset": offset}, categories
+        )
 
-        params: dict[str, Any] = {
-            "t": search_type,
-            "q": query,
-            "limit": limit,
-            "offset": offset,
-        }
+    def recent(self, categories: list[int] | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """The newest releases: a search without a query is the indexer's RSS feed."""
+        return self._search_params({"t": "search", "limit": limit}, categories)
+
+    def _search_params(
+        self, params: dict[str, Any], categories: list[int] | None
+    ) -> list[dict[str, Any]]:
+        query = params.get("q", "")
         if categories:
             params["cat"] = ",".join(str(c) for c in categories)
 

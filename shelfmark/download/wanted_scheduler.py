@@ -34,6 +34,7 @@ from shelfmark.core.utils import ARCHIVE_FORMATS
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
 from shelfmark.core.wanted_config import (
     backoff_hours,
+    feed_interval_minutes,
     format_order,
     format_wait,
     max_searches_per_hour,
@@ -100,6 +101,10 @@ _LOCAL_FAILURE_PATTERN = re.compile(
 )
 # A user's own search makes background searches wait, but never longer than this.
 _MAX_YIELD_SECONDS = 30 * 60
+# Sources with feeds of their newest releases.
+_FEED_SOURCES = ("prowlarr", "newznab")
+# Feed releases already checked, remembered so each is matched against bookmarks once.
+_FEED_SEEN_LIMIT = 20_000
 
 
 @dataclass
@@ -294,6 +299,8 @@ class WantedScheduler:
         self._cycles: dict[int, _Cycle] = {}
         self._searches: deque[float] = deque()
         self._source_fingerprint: str | None = None
+        self._feed_checked_at: float | None = None
+        self._feed_seen: dict[str, None] = {}
         # Download worker threads and the terminal hook touch these, the scheduler too.
         self._delivery_lock = threading.Lock()
         self._payloads: dict[str, dict[str, Any]] = {}
@@ -352,9 +359,94 @@ class WantedScheduler:
             return
         self._detect_source_changes()
         self._continue_cycles()
+        self._check_feeds()
         due = self._service.due_items(now_utc_iso(), 1)
         if due and not self._should_yield(due[0]):
             self.run_cycle(due[0]["id"])
+
+    def _check_feeds(self) -> None:
+        """Match the newest releases of indexer feeds against every waiting bookmark."""
+        interval = feed_interval_minutes()
+        now = time.monotonic()
+        if interval <= 0 or (
+            self._feed_checked_at is not None and now - self._feed_checked_at < interval * 60
+        ):
+            return
+        self._feed_checked_at = now
+        sources = [source for source in self._available_sources() if source in _FEED_SOURCES]
+        items = [
+            item
+            for item in self._service.items_in_state(STATE_WAITING)
+            if _search_starts(item["book_data"]) is None
+        ]
+        if not sources or not items:
+            return
+        fresh = self._fresh_feed_releases(sources)
+        if not fresh:
+            return
+        logger.debug("Wanted: %d new release(s) in indexer feeds", len(fresh))
+        for item in items:
+            # Each match runs the picker; let requests in between on the gevent loop.
+            time.sleep(0)
+            self._match_feed(item, fresh)
+
+    def _fresh_feed_releases(self, sources: list[str]) -> list[Release]:
+        from shelfmark.release_sources import get_source
+
+        fresh: list[Release] = []
+        for name in sources:
+            try:
+                releases = get_source(name).recent_releases(WANTED_CONTENT_TYPE) or []
+            except Exception as exc:  # noqa: BLE001 - a broken feed must not stop the others
+                logger.warning("Wanted: could not read the %s feeds: %s", name, exc)
+                continue
+            for release in releases:
+                key = f"{release.source}:{release.source_id}"
+                if key in self._feed_seen:
+                    continue
+                self._feed_seen[key] = None
+                fresh.append(release)
+        while len(self._feed_seen) > _FEED_SEEN_LIMIT:
+            self._feed_seen.pop(next(iter(self._feed_seen)))
+        return fresh
+
+    def _match_feed(self, item: dict[str, Any], fresh: list[Release]) -> None:
+        wanted_id = item["id"]
+        pending = self._pending_subscribers(wanted_id)
+        sources = [
+            source
+            for source in self._available_sources()
+            if source in _FEED_SOURCES and self._users_allowed(pending, source)
+        ]
+        candidates = [release for release in fresh if release.source in sources]
+        if not pending or not candidates:
+            return
+        prefs = self._preferences(pending, sources)
+        picked = pick_releases(
+            candidates,
+            item["book_data"],
+            prefs,
+            self._service.blocked_release_keys(wanted_id),
+        )
+        picked, _hold = self._hold_for_format(picked, pending, prefs.preferred_formats)
+        if not picked:
+            return
+        cycle_number = int(item["search_count"]) + 1
+        claimed = self._service.update_item(
+            wanted_id,
+            expected_state=STATE_WAITING,
+            state=STATE_SEARCHING,
+            search_count=cycle_number,
+            last_result=f"Found in the {picked[0].source.title()} feed",
+        )
+        if claimed is None:
+            return
+        logger.info("Wanted: %s turned up in an indexer feed", item["title"])
+        self._cycles[wanted_id] = _Cycle(
+            number=cycle_number, started=time.monotonic(), releases=picked
+        )
+        self._changed(wanted_id)
+        self._try_next(wanted_id)
 
     def _should_yield(self, item: dict[str, Any]) -> bool:
         from shelfmark.download import warmup

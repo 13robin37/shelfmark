@@ -12,6 +12,7 @@ from shelfmark.core.settings_registry import (
 )
 from shelfmark.core.wanted_config import (
     DEFAULT_BACKOFF_HOURS,
+    DEFAULT_FEED_INTERVAL_MINUTES,
     DEFAULT_MAX_SEARCHES_PER_HOUR,
     default_format_order,
     default_source_order,
@@ -146,6 +147,19 @@ def wanted_settings() -> list[SettingsField]:
             default=DEFAULT_MAX_SEARCHES_PER_HOUR,
             min_value=1,
             max_value=60,
+            show_when={"field": "WANTED_ENABLED", "value": True},
+        ),
+        NumberField(
+            key="WANTED_FEED_INTERVAL_MINUTES",
+            label="Indexer Feed Interval (minutes)",
+            description=(
+                "How often the newest releases of Prowlarr and Newznab indexers are checked "
+                "against every bookmark. One request per indexer, however many books are "
+                "bookmarked, and not counted as searches. 0 turns it off."
+            ),
+            default=DEFAULT_FEED_INTERVAL_MINUTES,
+            min_value=0,
+            max_value=1440,
             show_when={"field": "WANTED_ENABLED", "value": True},
         ),
     ]
