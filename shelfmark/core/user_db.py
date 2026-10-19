@@ -114,6 +114,66 @@ WHERE dismissed_at IS NOT NULL AND cleared_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_activity_view_state_hidden
 ON activity_view_state (viewer_scope, item_type, item_key)
 WHERE dismissed_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS wanted_items (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider         TEXT NOT NULL,
+    provider_id      TEXT NOT NULL,
+    isbn_13          TEXT,
+    isbn_10          TEXT,
+    title            TEXT NOT NULL,
+    author           TEXT,
+    book_data        TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'waiting',
+    current_task_id  TEXT,
+    search_count     INTEGER NOT NULL DEFAULT 0,
+    backoff_level    INTEGER NOT NULL DEFAULT 0,
+    last_search_at   TIMESTAMP,
+    next_search_at   TIMESTAMP,
+    last_result      TEXT,
+    searched_sources TEXT,
+    obtained_at      TIMESTAMP,
+    obtained_reason  TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(provider, provider_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wanted_items_due
+ON wanted_items (state, next_search_at);
+
+CREATE TABLE IF NOT EXISTS wanted_subscribers (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    wanted_id        INTEGER NOT NULL REFERENCES wanted_items(id) ON DELETE CASCADE,
+    user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    languages        TEXT,
+    delivered_at     TIMESTAMP,
+    delivery_task_id TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wanted_subscribers_unique
+ON wanted_subscribers (wanted_id, IFNULL(user_id, 0));
+
+CREATE TABLE IF NOT EXISTS wanted_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    wanted_id     INTEGER NOT NULL REFERENCES wanted_items(id) ON DELETE CASCADE,
+    cycle         INTEGER NOT NULL,
+    source        TEXT NOT NULL,
+    source_id     TEXT NOT NULL,
+    match_key     TEXT,
+    release_title TEXT,
+    format        TEXT,
+    size          TEXT,
+    indexer       TEXT,
+    status        TEXT NOT NULL,
+    error_message TEXT,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at   TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_wanted_attempts_wanted
+ON wanted_attempts (wanted_id, status);
 """
 
 

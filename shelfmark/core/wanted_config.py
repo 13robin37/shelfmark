@@ -1,0 +1,96 @@
+"""Readers for the wanted list settings."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from shelfmark.core.config import config
+from shelfmark.core.request_helpers import coerce_bool
+
+DEFAULT_BACKOFF_HOURS: tuple[float, ...] = (1.0, 6.0, 24.0)
+DEFAULT_MAX_SEARCHES_PER_HOUR = 6
+_DEFAULT_SOURCES: tuple[tuple[str, bool], ...] = (
+    ("direct_download", True),
+    ("libgen", True),
+    ("prowlarr", True),
+    ("newznab", True),
+    ("irc", False),
+)
+_DEFAULT_FORMATS = ("epub", "azw3", "mobi", "fb2", "pdf", "djvu", "cbz", "cbr")
+
+
+def default_source_order() -> list[dict[str, Any]]:
+    """Default value of WANTED_SOURCES."""
+    return [{"id": source, "enabled": enabled} for source, enabled in _DEFAULT_SOURCES]
+
+
+def default_format_order() -> list[str]:
+    """Formats offered by WANTED_PREFERRED_FORMATS, in default order."""
+    return list(_DEFAULT_FORMATS)
+
+
+def _ordered_entries(value: object, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = value if isinstance(value, list) else default
+    return [
+        entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    ]
+
+
+def wanted_enabled() -> bool:
+    """Whether the wanted list is switched on."""
+    return coerce_bool(config.get("WANTED_ENABLED", False), default=False)
+
+
+def wanted_sources() -> list[str]:
+    """Enabled wanted-list sources in order of preference."""
+    entries = _ordered_entries(config.get("WANTED_SOURCES"), default_source_order())
+    return [entry["id"] for entry in entries if entry.get("enabled", True)]
+
+
+def preferred_formats() -> tuple[tuple[str, ...], frozenset[str]]:
+    """(format preference order, formats never to download automatically)."""
+    default = [{"id": fmt, "enabled": True} for fmt in _DEFAULT_FORMATS]
+    entries = _ordered_entries(config.get("WANTED_PREFERRED_FORMATS"), default)
+    order = tuple(entry["id"].lower() for entry in entries if entry.get("enabled", True))
+    excluded = frozenset(entry["id"].lower() for entry in entries if not entry.get("enabled", True))
+    return order, excluded
+
+
+def supported_formats() -> frozenset[str]:
+    """Formats allowed in search results (SUPPORTED_FORMATS)."""
+    value = config.get("SUPPORTED_FORMATS", None)
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",")]
+    if not isinstance(value, list):
+        return frozenset(_DEFAULT_FORMATS)
+    return frozenset(str(fmt).strip().lower() for fmt in value if str(fmt).strip())
+
+
+def backoff_hours() -> tuple[float, ...]:
+    """Hours between searches for a book not yet found; the last value repeats."""
+    value = config.get("WANTED_SEARCH_BACKOFF_HOURS", None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        raw: list[object] = [value]
+    elif isinstance(value, str):
+        raw = [part for part in value.replace(";", ",").split(",") if part.strip()]
+    else:
+        raw = []
+    hours: list[float] = []
+    for part in raw:
+        try:
+            parsed = float(str(part).strip())
+        except ValueError:
+            continue
+        if parsed > 0:
+            hours.append(parsed)
+    return tuple(hours) or DEFAULT_BACKOFF_HOURS
+
+
+def max_searches_per_hour() -> int:
+    """Upper limit for background searches per hour."""
+    value = config.get("WANTED_MAX_SEARCHES_PER_HOUR", DEFAULT_MAX_SEARCHES_PER_HOUR)
+    try:
+        parsed = int(float(str(value)))
+    except ValueError:
+        return DEFAULT_MAX_SEARCHES_PER_HOUR
+    return max(parsed, 1)

@@ -93,6 +93,7 @@ from shelfmark.core.viewer_redaction import (
     redact_status,
     viewer_download_id,
 )
+from shelfmark.core.wanted_service import WantedService
 from shelfmark.download import orchestrator as backend
 from shelfmark.download import warmup
 from shelfmark.release_sources import (
@@ -197,11 +198,13 @@ _user_db_path = str(Path(os.environ.get("CONFIG_DIR", "/config")) / "users.db")
 user_db: UserDB | None = None
 download_history_service: DownloadHistoryService | None = None
 activity_view_state_service: ActivityViewStateService | None = None
+wanted_service: WantedService | None = None
 try:
     user_db = UserDB(_user_db_path)
     user_db.initialize()
     download_history_service = DownloadHistoryService(_user_db_path)
     activity_view_state_service = ActivityViewStateService(_user_db_path)
+    wanted_service = WantedService(_user_db_path)
     import_module("shelfmark.config.users_settings")
     from shelfmark.core.admin_routes import register_admin_routes
     from shelfmark.core.oidc_routes import register_oidc_routes
@@ -219,6 +222,7 @@ except (sqlite3.OperationalError, OSError) as e:
     user_db = None
     download_history_service = None
     activity_view_state_service = None
+    wanted_service = None
 
 
 def _warn_if_local_admin_missing() -> None:
@@ -595,6 +599,17 @@ if user_db is not None:
             )
     except _IMPORT_OPERATIONAL_ERRORS as e:
         logger.warning("Failed to register request routes: %s", e)
+
+if wanted_service is not None:
+    import_module("shelfmark.config.wanted_settings")
+    from shelfmark.core.wanted_routes import register_wanted_routes
+
+    register_wanted_routes(
+        app,
+        user_db,
+        wanted_service,
+        resolve_auth_mode=_resolve_auth_mode_for_routes,
+    )
 
 
 # Enable CORS in development mode for local frontend development
@@ -2830,6 +2845,7 @@ def api_metadata_search() -> Response | tuple[Response, int]:
                 book_dict["cover_url"] = transform_cover_url(book_dict["cover_url"], cache_id)
         for book, book_dict in zip(search_result.books, books_data, strict=True):
             _attach_library_ownership(book, book_dict)
+        _attach_wanted_states(books_data)
 
         response_data = {
             "books": books_data,
@@ -2890,6 +2906,25 @@ def api_metadata_field_options() -> Response:
         return jsonify({"options": []})
 
 
+def _attach_wanted_states(book_dicts: list[dict[str, Any]]) -> None:
+    """Add ``wanted`` for books on the wanted list, so results can show the bookmark."""
+    from shelfmark.core.wanted_config import wanted_enabled
+
+    if wanted_service is None or not wanted_enabled():
+        return
+    keys = [
+        (str(book_dict["provider"]), str(book_dict["provider_id"]))
+        for book_dict in book_dicts
+        if book_dict.get("provider") and book_dict.get("provider_id")
+    ]
+    viewer_id = normalize_positive_int(session.get("db_user_id"))
+    states = wanted_service.find_for_books(keys, user_id=viewer_id)
+    for book_dict in book_dicts:
+        state = states.get((str(book_dict.get("provider")), str(book_dict.get("provider_id"))))
+        if state is not None:
+            book_dict["wanted"] = state
+
+
 def _attach_library_ownership(book: Any, book_dict: dict[str, Any]) -> None:
     """Add per-format ownership under ``library`` when a library check is enabled."""
     from shelfmark.core import library_index
@@ -2948,6 +2983,7 @@ def api_metadata_book(provider: str, book_id: str) -> Response | tuple[Response,
 
         book_dict = asdict(book)
         _attach_library_ownership(book, book_dict)
+        _attach_wanted_states([book_dict])
 
         # Transform cover_url to local proxy URL when caching is enabled
         from shelfmark.core.utils import transform_cover_url
