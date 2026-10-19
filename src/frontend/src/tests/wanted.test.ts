@@ -239,8 +239,19 @@ describe('describeAttemptBlock', () => {
 describe('unreleased books', () => {
   it('says when a bookmarked book comes out', () => {
     const now = Date.parse('2026-10-19T12:00:00Z');
-    expect(describeWantedItem(item({ release_date: '2027-03-12' }), now)).toMatch(
-      /^Releases .*2027; searching starts a day before$/,
+    const unreleased = item({
+      release_date: '2027-03-12',
+      last_result: 'Not released yet',
+      next_search_at: '2026-10-26T12:00:00+00:00',
+    });
+    const expectedDate = new Date(Date.UTC(2027, 2, 12)).toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    expect(describeWantedItem(unreleased, now)).toBe(
+      `Releases ${expectedDate} · next search in 7 d`,
     );
     expect(describeWantedItem(item({ release_date: '2020-01-01' }), now)).toBe(
       'Waiting for the first search',

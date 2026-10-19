@@ -2657,6 +2657,7 @@ function App() {
                 book={activeReleaseBook}
                 onClose={handleReleaseModalClose}
                 onDownload={isBrowseFulfilMode ? handleBrowseFulfilDownload : handleReleaseDownload}
+                allowWantedGrab={!isBrowseFulfilMode && !effectiveActingAsUser}
                 onRequestRelease={isBrowseFulfilMode ? undefined : handleReleaseRequest}
                 onRequestBook={
                   isBrowseFulfilMode || !requestRoleIsAdmin ? undefined : handleReleaseBookRequest

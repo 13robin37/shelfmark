@@ -104,6 +104,14 @@ def normalize_book_data(book_data: object) -> dict[str, Any]:
     provider_id = normalized.get("provider_id")
     if isinstance(provider_id, int) and not isinstance(provider_id, bool):
         normalized["provider_id"] = str(provider_id)
+    if "release_date" in normalized:
+        from shelfmark.metadata_providers import parse_release_date
+
+        release_date = parse_release_date(normalized["release_date"])
+        if release_date is None:
+            normalized.pop("release_date")
+        else:
+            normalized["release_date"] = release_date
     for key in ("title", "provider", "provider_id"):
         if normalize_optional_text(normalized.get(key)) is None:
             msg = f"book.{key} is required"

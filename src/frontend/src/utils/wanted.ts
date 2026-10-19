@@ -140,16 +140,20 @@ export const describeWantedItem = (item: WantedItem, now: number = Date.now()): 
     return 'Paused by an admin';
   }
   const release = item.release_date ? Date.parse(item.release_date) : Number.NaN;
-  if (!Number.isNaN(release) && release > now) {
-    const date = new Date(release).toLocaleDateString(undefined, {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
-    return `Releases ${date}; searching starts a day before`;
-  }
+  const unreleased = !Number.isNaN(release) && release > now;
+  // A calendar date: show the day itself, not that moment in the viewer's time zone.
+  const releaseLine = unreleased
+    ? `Releases ${new Date(release).toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'UTC',
+      })}`
+    : null;
   const next = formatRelativeTime(item.next_search_at, now);
-  const parts = [item.last_result, next ? `next search ${next}` : null].filter(Boolean);
+  const lastResult =
+    unreleased && item.last_result === 'Not released yet' ? null : item.last_result;
+  const parts = [releaseLine, lastResult, next ? `next search ${next}` : null].filter(Boolean);
   return parts.length > 0 ? parts.join(' · ') : 'Waiting for the first search';
 };
 

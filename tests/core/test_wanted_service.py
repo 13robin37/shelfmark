@@ -414,3 +414,13 @@ def test_language_lists_are_bounded(service, users):
         service.set_languages(item["id"], users[0]["id"], [f"l{index}" for index in range(21)])
     with pytest.raises(WantedServiceError):
         service.set_languages(item["id"], users[0]["id"], ["x" * 17])
+
+
+def test_only_real_release_dates_are_stored(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book(release_date="March 12, 2027"))
+    assert item["book_data"]["release_date"] == "2027-03-12"
+    other, _ = service.add(
+        user_id=users[0]["id"],
+        book_data=_book(provider_id="2", isbn_13=None, release_date="soon"),
+    )
+    assert "release_date" not in other["book_data"]

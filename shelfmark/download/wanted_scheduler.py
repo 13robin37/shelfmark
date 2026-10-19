@@ -101,6 +101,9 @@ _LOCAL_FAILURE_PATTERN = re.compile(
 )
 # A user's own search makes background searches wait, but never longer than this.
 _MAX_YIELD_SECONDS = 30 * 60
+_DUE_BATCH = 5
+# A release date is checked against the metadata again at least this often.
+_RELEASE_RECHECK = timedelta(days=7)
 # Sources with feeds of their newest releases.
 _FEED_SOURCES = ("prowlarr", "newznab")
 # Feed releases already checked, remembered so each is matched against bookmarks once.
@@ -116,6 +119,8 @@ class _Cycle:
     releases: list[Release] = field(default_factory=list)
     queue_error: str | None = None
     announced: bool = False
+    # A release a user picked: when it fails, the item waits as planned, no backoff.
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,24 +141,17 @@ def _parse_time(value: object) -> datetime | None:
 
 
 def _search_starts(book_data: dict[str, Any], book: BookMetadata | None = None) -> datetime | None:
-    """When searching may start for a book not released yet (a day early); None if it may now."""
-    released: datetime | None = None
+    """When searching may start for a book not released yet (a day early); None if it may now.
+
+    Only a full release date counts: a bare year is often an edition's, not the book's.
+    """
     date = (book.release_date if book is not None else None) or book_data.get("release_date")
-    if isinstance(date, str):
-        try:
-            released = datetime.fromisoformat(date).replace(tzinfo=UTC)
-        except ValueError:
-            released = None
-    if released is None:
-        raw_year = str(book_data.get("year") or "").strip()[:4]
-        year = _positive_int(book.publish_year if book is not None else None) or (
-            int(raw_year) if raw_year.isdigit() else None
-        )
-        if year is not None and year > datetime.now(UTC).year:
-            released = datetime(year, 1, 1, tzinfo=UTC)
-    if released is None:
+    if not isinstance(date, str):
         return None
-    start = released - timedelta(days=1)
+    try:
+        start = datetime.fromisoformat(date).replace(tzinfo=UTC) - timedelta(days=1)
+    except ValueError, OverflowError:
+        return None
     return start if start > datetime.now(UTC) else None
 
 
@@ -300,6 +298,8 @@ class WantedScheduler:
         self._searches: deque[float] = deque()
         self._source_fingerprint: str | None = None
         self._feed_checked_at: float | None = None
+        # Items a user asked to search now, even before their release date.
+        self._forced: set[int] = set()
         self._feed_seen: dict[str, None] = {}
         # Download worker threads and the terminal hook touch these, the scheduler too.
         self._delivery_lock = threading.Lock()
@@ -360,9 +360,10 @@ class WantedScheduler:
         self._detect_source_changes()
         self._continue_cycles()
         self._check_feeds()
-        due = self._service.due_items(now_utc_iso(), 1)
-        if due and not self._should_yield(due[0]):
-            self.run_cycle(due[0]["id"])
+        # Books not out yet only get their date checked; keep going to one that searches.
+        for item in self._service.due_items(now_utc_iso(), _DUE_BATCH):
+            if self._should_yield(item) or self.run_cycle(item["id"]):
+                break
 
     def _check_feeds(self) -> None:
         """Match the newest releases of indexer feeds against every waiting bookmark."""
@@ -586,21 +587,29 @@ class WantedScheduler:
     def _continue_cycles(self) -> None:
         """Queue the next candidate for items whose last attempt has ended."""
         for item in self._service.items_in_state(STATE_SEARCHING):
-            cycle = self._cycles.get(item["id"])
-            if cycle is None:
-                # No cycle in memory (a restart or a crash mid-search): start over later.
-                self._end_cycle(item, found_nothing=True, source_errors=True)
-            elif time.monotonic() - cycle.started > CANDIDATES_MAX_AGE_SECONDS:
-                self._cycles.pop(item["id"], None)
-                self._service.update_item(
-                    item["id"],
-                    expected_state=STATE_SEARCHING,
-                    state=STATE_WAITING,
-                    next_search_at=now_utc_iso(),
-                )
-                self._changed(item["id"])
-            else:
-                self._try_next(item["id"])
+            # A user's pick (grab) claims and queues under this lock; do not step in between.
+            with self._terminal_lock:
+                self._continue_cycle(item["id"])
+
+    def _continue_cycle(self, wanted_id: int) -> None:
+        item = self._service.get_item(wanted_id)
+        if item is None or item["state"] != STATE_SEARCHING:
+            return
+        cycle = self._cycles.get(wanted_id)
+        if cycle is None:
+            # No cycle in memory (a restart or a crash mid-search): start over later.
+            self._end_cycle(item, found_nothing=True, source_errors=True)
+        elif time.monotonic() - cycle.started > CANDIDATES_MAX_AGE_SECONDS:
+            self._cycles.pop(wanted_id, None)
+            self._service.update_item(
+                wanted_id,
+                expected_state=STATE_SEARCHING,
+                state=STATE_WAITING,
+                next_search_at=now_utc_iso(),
+            )
+            self._changed(wanted_id)
+        else:
+            self._try_next(wanted_id)
 
     # -- sources, users, book --------------------------------------------------------
 
@@ -682,6 +691,7 @@ class WantedScheduler:
             search_title=book_data.get("search_title"),
             search_author=book_data.get("search_author"),
             series_name=book_data.get("series_name"),
+            release_date=book_data.get("release_date"),
         )
 
     @staticmethod
@@ -697,15 +707,30 @@ class WantedScheduler:
 
     # -- cycle -----------------------------------------------------------------------
 
-    def run_cycle(self, wanted_id: int) -> None:
-        """Search all allowed sources for an item and start trying its releases."""
+    def search_now(self, wanted_id: int) -> None:
+        """Search an item at the next tick, even before its release date."""
+        self._forced.add(wanted_id)
+        self.wake()
+
+    def run_cycle(self, wanted_id: int) -> bool:
+        """Search all allowed sources for an item and start trying its releases.
+
+        Returns whether a search ran (a book not out yet only gets its date checked).
+        """
         item = self._service.get_item(wanted_id)
         if item is None or item["state"] != STATE_WAITING:
-            return
-        starts = _search_starts(item["book_data"])
-        if starts is not None:
-            self._wait_for_release(wanted_id, starts, STATE_WAITING)
-            return
+            return False
+        forced = wanted_id in self._forced
+        self._forced.discard(wanted_id)
+        if not forced and _search_starts(item["book_data"]) is not None:
+            # The date may have moved; a metadata lookup is no release search.
+            book = self._resolve_book(item["book_data"])
+            book_data = self._remember_book(wanted_id, item["book_data"], book)
+            starts = _search_starts(book_data, book)
+            if starts is not None:
+                self._wait_for_release(wanted_id, starts)
+                return False
+        before = item
         cycle_number = int(item["search_count"]) + 1
         item = self._service.update_item(
             wanted_id,
@@ -715,22 +740,28 @@ class WantedScheduler:
             last_search_at=now_utc_iso(),
         )
         if item is None:
-            return
+            return False
         self._changed(wanted_id)
 
         pending = self._pending_subscribers(wanted_id)
         if not pending:
             self._mark_obtained(item, reason=item.get("obtained_reason") or "downloaded")
-            return
+            return True
 
         book = self._resolve_book(item["book_data"])
-        if book.release_date and book.release_date != item["book_data"].get("release_date"):
-            item["book_data"] = {**item["book_data"], "release_date": book.release_date}
-            self._service.update_item(wanted_id, book_data=item["book_data"])
-        starts = _search_starts(item["book_data"], book)
+        item["book_data"] = self._remember_book(wanted_id, item["book_data"], book)
+        starts = None if forced else _search_starts(item["book_data"], book)
         if starts is not None:
-            self._wait_for_release(wanted_id, starts, STATE_SEARCHING)
-            return
+            # Only now learned the book is not out: undo the claim, no search ran.
+            self._service.update_item(
+                wanted_id,
+                expected_state=STATE_SEARCHING,
+                state=STATE_WAITING,
+                search_count=before["search_count"],
+                last_search_at=before.get("last_search_at"),
+            )
+            self._wait_for_release(wanted_id, starts)
+            return False
         if self._in_library(book):
             # Only those whose downloads go to a folder have it; email and BookLore
             # subscribers still want it delivered.
@@ -749,7 +780,7 @@ class WantedScheduler:
                 pending = [sub for sub in pending if sub not in in_library]
             if not pending:
                 self._mark_obtained(item, reason="in_library")
-                return
+                return True
 
         sources = [
             source for source in self._available_sources() if self._users_allowed(pending, source)
@@ -771,7 +802,7 @@ class WantedScheduler:
                     wanted_id, expected_state=STATE_WAITING, next_search_at=now_utc_iso()
                 )
             self._changed(wanted_id)
-            return
+            return True
 
         self._searches.append(time.monotonic())
         releases, answered, failed = self._search(sources, book, pending)
@@ -779,7 +810,7 @@ class WantedScheduler:
         formats = prefs.preferred_formats
         picked = pick_releases(
             releases,
-            self._picker_book(item["book_data"], book),
+            item["book_data"],
             prefs,
             self._service.excluded_release_keys(wanted_id, cycle_number),
         )
@@ -811,19 +842,31 @@ class WantedScheduler:
                 result=result,
                 search_by=hold.until if hold is not None else None,
             )
-            return
+            return True
         self._cycles[wanted_id] = _Cycle(
             number=cycle_number, started=time.monotonic(), releases=picked
         )
         self._try_next(wanted_id)
+        return True
 
-    def _wait_for_release(self, wanted_id: int, starts: datetime, expected_state: str) -> None:
-        self._cycles.pop(wanted_id, None)
+    def _remember_book(
+        self, wanted_id: int, book_data: dict[str, Any], book: BookMetadata
+    ) -> dict[str, Any]:
+        """Keep what the metadata adds (release date, series, authors) for later matching."""
+        enriched = self._picker_book(book_data, book)
+        if book.release_date:
+            enriched["release_date"] = book.release_date
+        if enriched != book_data:
+            self._service.update_item(wanted_id, book_data=enriched)
+        return enriched
+
+    def _wait_for_release(self, wanted_id: int, starts: datetime) -> None:
+        # Check the date again now and then: releases move, and placeholders get fixed.
+        recheck = datetime.now(UTC) + _RELEASE_RECHECK
         waiting = self._service.update_item(
             wanted_id,
-            expected_state=expected_state,
-            state=STATE_WAITING,
-            next_search_at=starts.isoformat(timespec="seconds"),
+            expected_state=STATE_WAITING,
+            next_search_at=min(starts, recheck).isoformat(timespec="seconds"),
             last_result="Not released yet",
         )
         if waiting is not None:
@@ -917,6 +960,10 @@ class WantedScheduler:
                 return False, "Wanted item not found"
             if item["state"] != STATE_WAITING:
                 return False, f"The wanted list is {item['state']} for this book"
+            with self._delivery_lock:
+                in_flight = release.source_id in self._payloads
+            if in_flight:
+                return False, "This release is already downloading"
             cycle_number = int(item["search_count"]) + 1
             claimed = self._service.update_item(
                 wanted_id,
@@ -926,7 +973,7 @@ class WantedScheduler:
             )
             if claimed is None:
                 return False, "The wanted list is busy with this book"
-            cycle = _Cycle(number=cycle_number, started=time.monotonic())
+            cycle = _Cycle(number=cycle_number, started=time.monotonic(), manual=True)
             self._cycles[wanted_id] = cycle
             if self._queue_attempt(claimed, release, owner, cycle_number):
                 return True, None
@@ -1003,6 +1050,16 @@ class WantedScheduler:
             if self._queue_attempt(item, release, owner, cycle.number):
                 return
         self._cycles.pop(wanted_id, None)
+        if cycle.manual:
+            self._service.update_item(
+                wanted_id,
+                expected_state=STATE_SEARCHING,
+                state=STATE_WAITING,
+                current_task_id=None,
+                last_result="The picked release failed",
+            )
+            self._changed(wanted_id)
+            return
         result = "Every matching release failed"
         if cycle.queue_error:
             result = f"{result}; could not queue: {cycle.queue_error}"

@@ -170,6 +170,8 @@ interface ReleaseModalProps {
   onSearchSeries?: (seriesName: string, seriesId?: string) => void; // Callback to search for series
   defaultShowManualQuery?: boolean;
   isRequestMode?: boolean;
+  /** Whether a download here may count for the viewer's own bookmark of the book. */
+  allowWantedGrab?: boolean;
   showReleaseSourceLinks?: boolean;
   onShowToast?: (message: string, type: 'success' | 'error' | 'info') => void;
   // Combined mode (ebook + audiobook in one transaction)
@@ -779,6 +781,7 @@ const ReleaseModalSession = ({
   onSearchSeries,
   defaultShowManualQuery = false,
   isRequestMode = false,
+  allowWantedGrab = false,
   showReleaseSourceLinks = true,
   onShowToast,
   combinedMode = null,
@@ -792,9 +795,13 @@ const ReleaseModalSession = ({
       : supportedFormats;
   const { canBookmarkBook, stateFor, evaluateReleases, grab } = useWanted();
   const wantedState = stateFor(book);
-  const wantedId = wantedState?.subscribed ? wantedState.id : null;
+  // Only an ebook bookmark still looking for a release has skip reasons worth showing.
+  const wantedId =
+    wantedState?.subscribed && contentType === 'ebook' && wantedState.state !== 'obtained'
+      ? wantedState.id
+      : null;
   // A download started here counts for the bookmark while it waits for a release.
-  const grabsForWanted = wantedId !== null && wantedState?.state === 'waiting';
+  const grabsForWanted = allowWantedGrab && wantedId !== null && wantedState?.state === 'waiting';
   const [wantedNotes, setWantedNotes] = useState<Record<string, string | null>>({});
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
@@ -1300,7 +1307,7 @@ const ReleaseModalSession = ({
             }. If it contains several books, enable the multi-book pack toggle.`,
           );
         }
-        if (grabsForWanted && wantedId !== null && !multiBook && contentType === 'ebook') {
+        if (grabsForWanted && wantedId !== null && !multiBook) {
           if (await grab(wantedId, release, book.title)) {
             handleClose();
           }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1021,8 +1022,10 @@ def test_an_unreleased_book_waits_without_searching(env):
     item = env.item(wanted_id)
     assert searched == []
     assert item["state"] == STATE_WAITING
-    assert item["next_search_at"].startswith("2999-03-11")
     assert item["search_count"] == 0
+    # The date is checked again within a week rather than trusted until 2999.
+    next_search = datetime.fromisoformat(item["next_search_at"])
+    assert next_search <= datetime.now(UTC) + timedelta(days=7, minutes=1)
 
 
 def test_a_release_date_found_in_the_metadata_defers_the_search(env):
@@ -1040,13 +1043,56 @@ def test_a_release_date_found_in_the_metadata_defers_the_search(env):
     item = env.item(wanted_id)
     assert env.queued == []
     assert item["book_data"]["release_date"] == "2999-03-12"
-    assert item["next_search_at"].startswith("2999-03-11")
+    assert item["search_count"] == 0
+    assert item["last_result"] == "Not released yet"
 
 
-def test_a_future_year_alone_waits_for_that_year():
-    assert ws._search_starts({"year": "2999"}).isoformat().startswith("2998-12-31")
-    assert ws._search_starts({"year": "2001"}) is None
+def test_only_a_full_date_defers_and_odd_dates_never_break_the_scheduler():
+    assert ws._search_starts({"year": "2999"}) is None
     assert ws._search_starts({"release_date": "2001-01-01"}) is None
+    assert ws._search_starts({"release_date": "0001-01-01"}) is None
+    assert ws._search_starts({"release_date": "not a date"}) is None
+    assert ws._search_starts({"release_date": "2999-03-12"}).isoformat().startswith("2999-03-11")
+
+
+def test_search_now_searches_a_book_not_out_yet(env):
+    wanted_id = env.add(release_date="2999-03-12")
+    env.scheduler.tick()
+    assert env.queued == []
+
+    env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
+    env.scheduler.search_now(wanted_id)
+    env.scheduler.tick()
+
+    assert len(env.queued) == 1
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+
+
+def test_a_failed_pick_keeps_the_planned_search(env):
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00", backoff_level=3)
+    env.scheduler.grab(wanted_id, _release("aa-9"), {"user_id": env.alice["id"]})
+
+    env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
+    env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert item["state"] == STATE_WAITING
+    assert item["backoff_level"] == 3
+    assert item["next_search_at"].startswith("2999-01-01")
+    assert item["last_result"] == "The picked release failed"
+
+
+def test_a_release_already_downloading_cannot_be_picked_again(env):
+    first = env.add()
+    second = env.add(title="Dune Messiah", provider_id="2")
+    env.scheduler.tick()
+    in_flight = env.item(first)["current_task_id"]
+
+    queued, error = env.scheduler.grab(second, _release(in_flight), {"user_id": env.alice["id"]})
+
+    assert queued is False
+    assert error == "This release is already downloading"
 
 
 def test_releases_are_evaluated_like_the_wanted_list_would(env):

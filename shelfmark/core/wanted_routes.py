@@ -261,7 +261,7 @@ def register_wanted_routes(
         raw = payload.get("releases") if isinstance(payload, dict) else None
         if not isinstance(raw, list):
             return _error("Expected a JSON object with releases", 400)
-        releases = [release for entry in raw[:500] if (release := release_from_dict(entry))]
+        releases = [release for entry in raw[:2000] if (release := release_from_dict(entry))]
         return jsonify({"reasons": scheduler.evaluate(wanted_id, releases)})
 
     @app.route("/api/wanted/<int:wanted_id>/grab", methods=["POST"])
@@ -305,6 +305,9 @@ def register_wanted_routes(
         wanted_service.update_item(
             wanted_id, expected_state=STATE_WAITING, next_search_at=now_utc_iso()
         )
+        if scheduler is not None:
+            # Asked for by a person: search even before the release date.
+            scheduler.search_now(wanted_id)
         _changed(wanted_id)
         return jsonify({"status": "scheduled"})
 
