@@ -339,3 +339,62 @@ def test_a_subscriber_may_pick_a_release_for_the_wanted_list(env):
         client.post(f"/api/wanted/{item['id']}/grab", json={"release": release}).status_code == 200
     )
     assert scheduler.grabbed == [(item["id"], "md5", {"user_id": alice["id"], "username": "alice"})]
+
+
+def test_watching_and_bookmarking_a_whole_series(env):
+    from shelfmark.metadata_providers import BookMetadata
+
+    client = env["client"]
+    _login(env, env["alice"])
+    books = [
+        BookMetadata(provider="hardcover", provider_id="1", title="Dune"),
+        BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah"),
+    ]
+    target = {"provider": "hardcover", "fields": {"series": "id:5"}, "label": "Dune"}
+    with (
+        patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=books),
+        patch(
+            "shelfmark.core.library_index.is_in_library",
+            side_effect=lambda book, _ct: book.provider_id == "1",
+        ),
+    ):
+        assert (
+            client.post(
+                "/api/wanted/watches", json={**target, "fields": {"series": "Dune"}}
+            ).status_code
+            == 400
+        )
+        created = client.post("/api/wanted/watches", json=target)
+        bulk = client.post("/api/wanted/bulk", json=target)
+
+    assert created.status_code == 201
+    watch = created.get_json()["watch"]
+    assert watch["own"] is True
+    assert env["service"].get_watch(watch["id"])["seen"] == ["hardcover:1", "hardcover:2"]
+    assert bulk.get_json() == {"bookmarked": 1, "in_library": 1, "failed": 0}
+    assert [item["provider_id"] for item in client.get("/api/wanted").get_json()["items"]] == ["2"]
+
+    _login(env, env["bob"])
+    assert client.delete(f"/api/wanted/watches/{watch['id']}").status_code == 404
+    _login(env, env["alice"])
+    assert client.delete(f"/api/wanted/watches/{watch['id']}").status_code == 200
+
+
+def test_only_admins_watch_for_someone_else(env):
+    client = env["client"]
+    target = {
+        "provider": "hardcover",
+        "fields": {"hardcover_list": "status:1"},
+        "label": "Want to Read",
+        "user_id": env["bob"]["id"],
+    }
+    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=[]):
+        _login(env, env["alice"])
+        assert client.post("/api/wanted/watches", json=target).status_code == 403
+        _login(env, env["admin"], is_admin=True)
+        response = client.post("/api/wanted/watches", json=target)
+
+    assert response.status_code == 201
+    stored = env["service"].get_watch(response.get_json()["watch"]["id"])
+    assert stored["user_id"] == env["bob"]["id"]
+    assert stored["approved_by"] == env["admin"]["id"]

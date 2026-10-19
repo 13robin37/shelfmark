@@ -38,6 +38,7 @@ from shelfmark.core.requests_service import (
     cancel_request,
     create_request,
     create_requests,
+    ensure_request_access,
     fulfil_request,
     reject_request,
 )
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
 
     from shelfmark.core.user_db import UserDB
+    from shelfmark.core.wanted_service import WantedService
 
 logger = setup_logger(__name__)
 _NOTIFICATION_TRIGGER_ERRORS = (RuntimeError, TypeError, ValueError)
@@ -562,6 +564,8 @@ def register_request_routes(
     resolve_auth_mode: Callable[[], str],
     queue_release: Callable[..., tuple[bool, str | None]],
     ws_manager: object | None = None,
+    wanted_service: WantedService | None = None,
+    on_wanted_change: Callable[[int | None], None] | None = None,
 ) -> None:
     """Register request policy and request lifecycle routes."""
 
@@ -976,6 +980,9 @@ def register_request_routes(
         except RequestServiceError as exc:
             return _error_response(str(exc), exc.status_code, code=exc.code)
 
+        return _announce_fulfilled(updated, admin_user_id)
+
+    def _announce_fulfilled(updated: dict[str, Any], admin_user_id: int) -> ResponseReturnValue:
         event_payload = {
             "request_id": updated["id"],
             "status": updated["status"],
@@ -1012,6 +1019,65 @@ def register_request_routes(
         )
 
         return jsonify(updated)
+
+    @app.route("/api/admin/requests/<int:request_id>/wanted", methods=["POST"])
+    def api_admin_request_to_wanted(request_id: int) -> ResponseReturnValue:
+        """Approve a book request by putting it on the wanted list for the requester."""
+        from shelfmark.core.wanted_config import wanted_enabled
+        from shelfmark.core.wanted_service import WantedServiceError
+
+        auth_gate = _require_request_endpoints_available(resolve_auth_mode)
+        if auth_gate is not None:
+            return auth_gate
+        admin_user_id, admin_gate = _require_admin_user_id()
+        if admin_gate is not None:
+            return admin_gate
+        if admin_user_id is None:
+            return jsonify({"error": "Admin user identity unavailable"}), 403
+        if wanted_service is None or not wanted_enabled():
+            return _error_response("The wanted list is disabled", 403, code="wanted_disabled")
+
+        try:
+            request_row = ensure_request_access(
+                user_db, request_id=request_id, actor_user_id=admin_user_id, is_admin=True
+            )
+        except RequestServiceError as exc:
+            return _error_response(str(exc), exc.status_code, code=exc.code)
+        if request_row.get("status") != RequestStatus.PENDING:
+            return _error_response("Request is already in a terminal state", 409)
+        if request_row.get("content_type") != "ebook" or request_row.get("release_data"):
+            # A request for one particular release is approved by downloading it.
+            return _error_response("Only book requests for ebooks can go on the wanted list", 400)
+        book_data = request_row.get("book_data")
+        try:
+            item, _created = wanted_service.add(
+                user_id=request_row["user_id"],
+                book_data={
+                    **(book_data if isinstance(book_data, dict) else {}),
+                    "content_type": "ebook",
+                },
+                approved_by=admin_user_id,
+            )
+        except WantedServiceError as exc:
+            return _error_response(str(exc), exc.status_code)
+
+        data = request.get_json(silent=True) or {}
+        admin_note = data.get("admin_note") if isinstance(data, dict) else None
+        try:
+            updated = fulfil_request(
+                user_db,
+                request_id=request_id,
+                admin_user_id=admin_user_id,
+                queue_release=queue_release,
+                admin_note=admin_note
+                or "On the wanted list; it downloads once a release turns up.",
+                manual_approval=True,
+            )
+        except RequestServiceError as exc:
+            return _error_response(str(exc), exc.status_code, code=exc.code)
+        if on_wanted_change is not None:
+            on_wanted_change(item["id"])
+        return _announce_fulfilled(updated, admin_user_id)
 
     @app.route("/api/admin/requests/<int:request_id>/reject", methods=["POST"])
     def api_admin_reject_request(request_id: int) -> ResponseReturnValue:

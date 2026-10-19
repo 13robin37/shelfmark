@@ -6,6 +6,7 @@ import type {
   WantedBookState,
   WantedItem,
   WantedState,
+  WantedWatchTarget,
 } from '../types';
 
 /** Providers whose ids are not metadata books (manual search, source-backed browse). */
@@ -244,4 +245,33 @@ export const describeAttemptBlock = (attempt: WantedAttempt): string | null => {
     return 'Blocked';
   }
   return `Blocked until ${until.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+};
+
+/** Whether a watch follows the same series, author or list as ``target``. */
+export const isWatchedTarget = (watch: WantedWatchTarget, target: WantedWatchTarget): boolean => {
+  const keys = Object.keys(target.fields);
+  return (
+    watch.provider === target.provider &&
+    Object.keys(watch.fields).length === keys.length &&
+    keys.every((key) => watch.fields[key] === target.fields[key])
+  );
+};
+
+const WATCH_FIELD_VALUE = /^(id|status):\d+$/;
+const WATCH_FIELDS = new Set(['series', 'author', 'hardcover_list']);
+
+/** What the current search shows, when it is one Hardcover series, author or list by id. */
+export const wantedWatchTargetFor = (
+  provider: string | null | undefined,
+  fieldKey: string | null | undefined,
+  value: unknown,
+  label: string | undefined,
+): WantedWatchTarget | null => {
+  if (provider !== 'hardcover' || !fieldKey || !WATCH_FIELDS.has(fieldKey)) {
+    return null;
+  }
+  if (typeof value !== 'string' || !WATCH_FIELD_VALUE.test(value)) {
+    return null;
+  }
+  return { provider, fields: { [fieldKey]: value }, label: label || value };
 };

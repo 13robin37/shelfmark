@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import { useWanted } from '../../contexts/WantedContext';
 import { useDependencyEffect } from '../../hooks/useMountEffect';
-import type { WantedAttempt, WantedItem } from '../../types';
+import type { WantedAttempt, WantedItem, WantedWatch } from '../../types';
 import {
   LANGUAGE_OPTION_ALL,
   LANGUAGE_OPTION_DEFAULT,
@@ -251,6 +251,46 @@ const WantedRow = ({ item }: { item: WantedItem }) => {
   );
 };
 
+const WatchRow = ({ watch }: { watch: WantedWatch }) => {
+  const { isAdmin, unwatch } = useWanted();
+  const synced = formatRelativeTime(watch.last_synced_at);
+  const details = [
+    isAdmin && watch.username ? `For ${watch.username}` : null,
+    watch.last_result,
+    synced ? `checked ${synced}` : null,
+  ].filter(Boolean);
+
+  return (
+    <li className="flex items-start justify-between gap-2 py-1.5">
+      <div className="min-w-0">
+        <p className="truncate text-sm" title={watch.label}>
+          {watch.label}
+        </p>
+        {details.length > 0 && <p className="truncate text-xs opacity-60">{details.join(' · ')}</p>}
+      </div>
+      <ActionButton label="Stop" tone="danger" onClick={() => void unwatch(watch)} />
+    </li>
+  );
+};
+
+/** Series, authors and lists whose new books are bookmarked as they appear. */
+const WatchList = () => {
+  const { watches } = useWanted();
+  if (watches.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mb-3 rounded-lg bg-gray-500/5 px-3 py-2">
+      <p className="text-xs font-medium tracking-wide uppercase opacity-70">Watching</p>
+      <ul className="divide-y divide-[color-mix(in_srgb,var(--border-muted)_40%,transparent)]">
+        {watches.map((watch) => (
+          <WatchRow key={watch.id} watch={watch} />
+        ))}
+      </ul>
+    </div>
+  );
+};
+
 /** Books bookmarked to download automatically, with where each one stands. */
 export const WantedList = () => {
   const { items, loading, isAdmin, clearObtained } = useWanted();
@@ -261,11 +301,14 @@ export const WantedList = () => {
 
   if (items.length === 0) {
     return (
-      <p className="mt-8 text-center text-sm opacity-70">
-        {loading
-          ? 'Loading wanted list...'
-          : 'No bookmarked books. Use the eye on a search result to add one.'}
-      </p>
+      <div>
+        <WatchList />
+        <p className="mt-8 text-center text-sm opacity-70">
+          {loading
+            ? 'Loading wanted list...'
+            : 'No bookmarked books. Use the eye on a search result to add one.'}
+        </p>
+      </div>
     );
   }
 
@@ -273,6 +316,7 @@ export const WantedList = () => {
 
   return (
     <div>
+      <WatchList />
       <div className="flex flex-wrap items-center gap-1.5 pb-2">
         {WANTED_FILTERS.map((key) => (
           <button

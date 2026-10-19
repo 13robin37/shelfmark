@@ -227,10 +227,12 @@ class WantedService:
         user_id: int | None,
         book_data: object,
         languages: object = None,
+        approved_by: int | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Bookmark a book for ``user_id``, joining an existing entry for the same book.
 
-        Returns the item and whether a new item was created.
+        ``approved_by`` (an admin) lets the bookmark download even where ``user_id`` would
+        otherwise have to request. Returns the item and whether a new item was created.
         """
         book = normalize_book_data(book_data)
         book["isbn_13"] = canonical_isbn13(book.get("isbn_13"), book.get("isbn_10"))
@@ -289,12 +291,14 @@ class WantedService:
                 ).fetchone()
                 if subscriber is None:
                     conn.execute(
-                        "INSERT INTO wanted_subscribers (wanted_id, user_id, languages, created_at) "
-                        "VALUES (?, ?, ?, ?)",
+                        "INSERT INTO wanted_subscribers "
+                        "(wanted_id, user_id, languages, approved_by, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
                         (
                             wanted_id,
                             user_id,
                             json.dumps(normalized_languages) if normalized_languages else None,
+                            approved_by,
                             now,
                         ),
                     )
@@ -313,8 +317,19 @@ class WantedService:
                             "WHERE id = ? AND state = ? AND next_search_at IS NULL",
                             (now, now, wanted_id, STATE_WAITING),
                         )
-                elif normalized_languages is not None:
-                    self._set_languages(conn, wanted_id, subscriber["id"], normalized_languages)
+                else:
+                    if normalized_languages is not None:
+                        self._set_languages(conn, wanted_id, subscriber["id"], normalized_languages)
+                    if approved_by is not None:
+                        conn.execute(
+                            "UPDATE wanted_subscribers SET approved_by = ? WHERE id = ?",
+                            (approved_by, subscriber["id"]),
+                        )
+                        conn.execute(
+                            "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
+                            "WHERE id = ? AND state = ? AND next_search_at IS NULL",
+                            (now, now, wanted_id, STATE_WAITING),
+                        )
                 conn.commit()
                 item = self._get_item(conn, wanted_id)
             finally:
@@ -855,6 +870,133 @@ class WantedService:
                     "UPDATE wanted_subscribers SET delivered_at = ?, delivery_task_id = ? "
                     "WHERE wanted_id = ? AND IFNULL(user_id, 0) = IFNULL(?, 0)",
                     [(now, task_id, wanted_id, user_id) for user_id in user_ids],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    # -- watches ---------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_watch(row: sqlite3.Row) -> dict[str, Any]:
+        watch = dict(row)
+        watch["fields"] = _load_json(watch.get("fields")) or {}
+        seen = _load_json(watch.get("seen"))
+        watch["seen"] = seen if isinstance(seen, list) else []
+        return watch
+
+    def add_watch(
+        self,
+        *,
+        user_id: int | None,
+        provider: str,
+        fields: dict[str, str],
+        label: str,
+        seen: list[str],
+        approved_by: int | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Watch a series, author or list for ``user_id``; seen books are not bookmarked.
+
+        ``approved_by`` (an admin) lets its bookmarks download where ``user_id`` must request.
+        """
+        encoded = json.dumps(fields, sort_keys=True)
+        now = now_utc_iso()
+        with self._lock:
+            conn = self._connect()
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM wanted_watches WHERE IFNULL(user_id, 0) = IFNULL(?, 0) "
+                    "AND provider = ? AND fields = ?",
+                    (user_id, provider, encoded),
+                ).fetchone()
+                if existing is not None:
+                    return self._row_to_watch(existing), False
+                cursor = conn.execute(
+                    "INSERT INTO wanted_watches (user_id, provider, fields, label, approved_by, "
+                    "seen, last_synced_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        provider,
+                        encoded,
+                        label[:200],
+                        approved_by,
+                        json.dumps(seen),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM wanted_watches WHERE id = ?", (cursor.lastrowid,)
+                ).fetchone()
+                return self._row_to_watch(row), True
+            finally:
+                conn.close()
+
+    def list_watches(self, *, user_id: int | None, include_all: bool) -> list[dict[str, Any]]:
+        """Watches a viewer sees, newest first, with their owner's username."""
+        conn = self._connect()
+        try:
+            query = (
+                "SELECT w.*, u.username AS username FROM wanted_watches w "
+                "LEFT JOIN users u ON u.id = w.user_id"
+            )
+            if include_all:
+                rows = conn.execute(f"{query} ORDER BY w.id DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    f"{query} WHERE IFNULL(w.user_id, 0) = IFNULL(?, 0) ORDER BY w.id DESC",
+                    (user_id,),
+                ).fetchall()
+            return [self._row_to_watch(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_watch(self, watch_id: int) -> dict[str, Any] | None:
+        """Return one watch, or None."""
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM wanted_watches WHERE id = ?", (watch_id,)).fetchone()
+            return self._row_to_watch(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def delete_watch(self, watch_id: int) -> bool:
+        """Stop watching; bookmarks the watch made stay."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cursor = conn.execute("DELETE FROM wanted_watches WHERE id = ?", (watch_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    def due_watch(self, synced_before: str) -> dict[str, Any] | None:
+        """The watch synced longest ago, if that was before ``synced_before``."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM wanted_watches "
+                "WHERE last_synced_at IS NULL OR last_synced_at < ? "
+                "ORDER BY last_synced_at, id LIMIT 1",
+                (synced_before,),
+            ).fetchone()
+            return self._row_to_watch(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def update_watch(
+        self, watch_id: int, *, seen: list[str], last_result: str, synced_at: str
+    ) -> None:
+        """Record a sync of a watch."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE wanted_watches SET seen = ?, last_result = ?, last_synced_at = ? "
+                    "WHERE id = ?",
+                    (json.dumps(seen), last_result, synced_at, watch_id),
                 )
                 conn.commit()
             finally:

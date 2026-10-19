@@ -1344,3 +1344,51 @@ def test_one_failing_match_does_not_cost_the_others_the_feed(env, feed):
 
     assert sorted(calls) == sorted([first, second])
     assert env.item(second)["state"] == STATE_DOWNLOADING
+
+
+def test_a_watch_bookmarks_only_books_it_has_not_seen(env):
+    watch, _ = env.service.add_watch(
+        user_id=env.alice["id"],
+        provider="hardcover",
+        fields={"series": "id:1"},
+        label="Dune",
+        seen=["hardcover:1"],
+    )
+    env.service.update_watch(watch["id"], seen=["hardcover:1"], last_result="", synced_at="2000")
+    books = [
+        BookMetadata(provider="hardcover", provider_id="1", title="Dune"),
+        BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah"),
+    ]
+    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=books):
+        env.scheduler._sync_watch()
+        env.scheduler._sync_watch()
+
+    items = env.service.list_items(user_id=env.alice["id"], include_all=False)
+    assert [item["provider_id"] for item in items] == ["2"]
+    synced = env.service.get_watch(watch["id"])
+    assert synced["seen"] == ["hardcover:1", "hardcover:2"]
+    assert synced["last_result"] == "Bookmarked 1 new book(s)"
+
+
+def test_a_watch_of_someone_without_rights_bookmarks_nothing(env):
+    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+    env.service.add_watch(
+        user_id=env.alice["id"], provider="hardcover", fields={"series": "id:1"}, label="D", seen=[]
+    )
+    env.service.update_watch(1, seen=[], last_result="", synced_at="2000")
+    book = BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah")
+    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=[book]) as fetch:
+        env.scheduler._sync_watch()
+
+    fetch.assert_not_called()
+    assert env.service.get_watch(1)["last_result"].startswith("Not allowed")
+
+
+def test_an_approved_bookmark_downloads_for_someone_who_must_request(env):
+    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+    admin = env.user_db.create_user(username="root", role="admin")
+    env.service.add(user_id=env.alice["id"], book_data=BOOK, approved_by=admin["id"])
+
+    env.scheduler.tick()
+
+    assert env.queued[-1][1] == env.alice["id"]

@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS wanted_subscribers (
     languages        TEXT,
     delivered_at     TIMESTAMP,
     delivery_task_id TEXT,
+    approved_by      INTEGER,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -174,6 +175,22 @@ CREATE TABLE IF NOT EXISTS wanted_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_wanted_attempts_wanted
 ON wanted_attempts (wanted_id, status);
+
+CREATE TABLE IF NOT EXISTS wanted_watches (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    provider       TEXT NOT NULL,
+    fields         TEXT NOT NULL,
+    label          TEXT NOT NULL,
+    approved_by    INTEGER,
+    seen           TEXT,
+    last_synced_at TIMESTAMP,
+    last_result    TEXT,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wanted_watches_unique
+ON wanted_watches (IFNULL(user_id, 0), provider, fields);
 """
 
 
@@ -270,6 +287,7 @@ class UserDB:
                 self._migrate_download_history_queued_at(conn)
                 self._migrate_download_history_retry_payload(conn)
                 self._migrate_download_history_downloads(conn)
+                self._migrate_wanted_subscriber_approval(conn)
                 conn.commit()
                 # WAL mode must be changed outside an open transaction.
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -336,6 +354,13 @@ class UserDB:
         column_names = {str(col["name"]) for col in columns}
         if "retry_payload" not in column_names:
             conn.execute("ALTER TABLE download_history ADD COLUMN retry_payload TEXT")
+
+    def _migrate_wanted_subscriber_approval(self, conn: sqlite3.Connection) -> None:
+        """Ensure wanted_subscribers.approved_by exists (bookmarks from approved requests)."""
+        columns = conn.execute("PRAGMA table_info(wanted_subscribers)").fetchall()
+        column_names = {str(col["name"]) for col in columns}
+        if "approved_by" not in column_names:
+            conn.execute("ALTER TABLE wanted_subscribers ADD COLUMN approved_by INTEGER")
 
     def _migrate_download_history_downloads(self, conn: sqlite3.Connection) -> None:
         """Ensure download_history.downloads exists for download count persistence."""

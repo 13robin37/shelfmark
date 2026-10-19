@@ -113,6 +113,7 @@ import {
 } from './utils/requestPolicyUi';
 import { getSearchByPreference, setSearchByPreference } from './utils/searchByPreference';
 import { buildUrlSearchHash } from './utils/urlSearchHash';
+import { wantedWatchTargetFor } from './utils/wanted';
 
 // eslint-disable-next-line import/no-unassigned-import -- global app stylesheet is loaded for side effects
 import './styles.css';
@@ -2070,6 +2071,15 @@ function App() {
     }
     return searchFieldLabels[activeQueryOption.field.key];
   }, [activeQueryOption, searchFieldLabels]);
+  const wantedWatchTarget =
+    effectiveSearchMode === 'universal' && effectiveContentType === 'ebook'
+      ? wantedWatchTargetFor(
+          effectiveMetadataProvider,
+          activeQueryOption?.field?.key,
+          activeQueryValue,
+          activeQueryValueLabel,
+        )
+      : null;
   const activeQueryUsesSeriesBrowse = Boolean(
     seriesBrowseCapability?.field_key &&
     activeQueryOption?.source === 'provider-field' &&
@@ -2583,6 +2593,7 @@ function App() {
             <ResultsSection
               books={books}
               visible={hasResults}
+              wantedWatchTarget={wantedWatchTarget}
               onDetails={handleShowDetails}
               onDownload={handleDownload}
               onGetReleases={handleGetReleases}

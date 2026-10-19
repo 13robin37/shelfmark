@@ -585,6 +585,9 @@ if user_db is not None:
             resolve_auth_mode=_resolve_auth_mode_for_routes,
             queue_release=_queue_release_for_routes,
             ws_manager=ws_manager,
+            wanted_service=wanted_service,
+            # Defined further down; looked up when called.
+            on_wanted_change=lambda wanted_id: _on_wanted_route_change(wanted_id),  # noqa: PLW0108
         )
         if download_history_service is not None and activity_view_state_service is not None:
             register_activity_routes(

@@ -4,19 +4,24 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState } fro
 import { useDependencyEffect } from '../hooks/useMountEffect';
 import {
   addWanted,
+  bookmarkAllForWanted,
   clearObtainedWanted,
   clearWantedBlocklist,
   evaluateWantedReleases,
   getWantedAttempts,
   grabWantedRelease,
+  listWantedWatches,
   getWantedStatus,
   listWanted,
   pauseWanted,
   removeWanted,
   resumeWanted,
   searchWantedNow,
+  requestToWanted,
   setWantedLanguages,
   unblockWantedRelease,
+  unwatchForWanted,
+  watchForWanted,
 } from '../services/api';
 import type {
   Book,
@@ -26,6 +31,8 @@ import type {
   WantedAttempt,
   WantedBookState,
   WantedItem,
+  WantedWatch,
+  WantedWatchTarget,
 } from '../types';
 import {
   buildWantedBookPayload,
@@ -43,6 +50,7 @@ interface WantedContextValue {
   canBookmark: boolean;
   isAdmin: boolean;
   items: WantedItem[];
+  watches: WantedWatch[];
   loading: boolean;
   canBookmarkBook: (book: Book) => boolean;
   bookLanguages: Language[];
@@ -65,6 +73,13 @@ interface WantedContextValue {
   ) => Promise<Record<string, string | null>>;
   /** Download a picked release for the wanted list; false if it could not be queued. */
   grab: (wantedId: number, release: Release, title: string) => Promise<boolean>;
+  /** Bookmark every book of a series, author or list not in the library yet. */
+  bookmarkAll: (target: WantedWatchTarget) => Promise<void>;
+  /** Bookmark new books of a series, author or list as they appear. */
+  watch: (target: WantedWatchTarget, userId?: number | null) => Promise<void>;
+  unwatch: (watch: WantedWatch) => Promise<void>;
+  /** Approve a book request by bookmarking it for the requester (admins). */
+  approveRequestToWanted: (requestId: number, title: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -75,6 +90,7 @@ const DISABLED_VALUE: WantedContextValue = {
   canBookmark: false,
   isAdmin: false,
   items: [],
+  watches: [],
   loading: false,
   canBookmarkBook: () => false,
   bookLanguages: [],
@@ -91,6 +107,10 @@ const DISABLED_VALUE: WantedContextValue = {
   unblockRelease: async () => undefined,
   evaluateReleases: async () => ({}),
   grab: async () => false,
+  bookmarkAll: async () => undefined,
+  watch: async () => undefined,
+  unwatch: async () => undefined,
+  approveRequestToWanted: async () => undefined,
   refresh: async () => undefined,
 };
 
@@ -125,6 +145,7 @@ export function WantedProvider({
   const [enabled, setEnabled] = useState(false);
   const [canBookmark, setCanBookmark] = useState(false);
   const [items, setItems] = useState<WantedItem[]>([]);
+  const [watches, setWatches] = useState<WantedWatch[]>([]);
   const [listLoaded, setListLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const latestRequest = useRef(0);
@@ -141,7 +162,9 @@ export function WantedProvider({
     setLoading(true);
     try {
       const status = await getWantedStatus();
-      const nextItems = status.enabled ? await listWanted() : [];
+      const [nextItems, nextWatches] = status.enabled
+        ? await Promise.all([listWanted(), listWantedWatches()])
+        : [[], []];
       // A later refresh has started; its answer is the newer one.
       if (request !== latestRequest.current) {
         return;
@@ -149,6 +172,7 @@ export function WantedProvider({
       setEnabled(status.enabled);
       setCanBookmark(status.can_bookmark);
       setItems(nextItems);
+      setWatches(nextWatches);
       setListLoaded(true);
       setOverrides(new Map());
     } catch (error) {
@@ -244,6 +268,7 @@ export function WantedProvider({
       canBookmark,
       isAdmin,
       items,
+      watches,
       loading,
       canBookmarkBook,
       bookLanguages,
@@ -278,6 +303,25 @@ export function WantedProvider({
         }, `Downloading "${title}" for the wanted list`);
         return queued;
       },
+      bookmarkAll: (target) =>
+        run(async () => {
+          const result = await bookmarkAllForWanted(target);
+          const skipped =
+            result.in_library > 0 ? `; ${result.in_library} already in the library` : '';
+          onShowToast(
+            `Bookmarked ${result.bookmarked} book(s) of ${target.label}${skipped}`,
+            'success',
+          );
+        }),
+      watch: (target, userId) =>
+        run(
+          () => watchForWanted(target, userId).then(() => undefined),
+          `Watching ${target.label}: new books will be bookmarked`,
+        ),
+      unwatch: (entry) =>
+        run(() => unwatchForWanted(entry.id), `No longer watching ${entry.label}`),
+      approveRequestToWanted: (requestId, title) =>
+        run(() => requestToWanted(requestId), `"${title}" is on the wanted list for the requester`),
       refresh,
     }),
     [
@@ -285,6 +329,7 @@ export function WantedProvider({
       canBookmark,
       isAdmin,
       items,
+      watches,
       loading,
       canBookmarkBook,
       bookLanguages,
@@ -293,6 +338,7 @@ export function WantedProvider({
       toggle,
       run,
       refresh,
+      onShowToast,
     ],
   );
 

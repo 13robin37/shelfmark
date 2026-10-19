@@ -607,6 +607,30 @@ export interface WantedItem {
   subscribers?: WantedSubscriber[];
 }
 
+/** A series, author or list whose new books go on the wanted list. */
+export interface WantedWatchTarget {
+  provider: string;
+  fields: Record<string, string>;
+  label: string;
+}
+
+export interface WantedWatch extends WantedWatchTarget {
+  id: number;
+  /** Whether the viewer's own bookmarks receive this watch's books. */
+  own: boolean;
+  last_synced_at: string | null;
+  last_result: string | null;
+  created_at: string | null;
+  user_id?: number | null;
+  username?: string | null;
+}
+
+export interface WantedBulkResult {
+  bookmarked: number;
+  in_library: number;
+  failed: number;
+}
+
 export interface WantedStatus {
   enabled: boolean;
   can_bookmark: boolean;

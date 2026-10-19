@@ -10,8 +10,10 @@ import {
   formatRelativeTime,
   indexOwnWantedItems,
   isBookmarkable,
+  isWatchedTarget,
   resolveWantedState,
   wantedKey,
+  wantedWatchTargetFor,
 } from '../utils/wanted';
 
 const book: Book = {
@@ -262,5 +264,27 @@ describe('unreleased books', () => {
     expect(buildWantedBookPayload({ ...book, release_date: '2027-03-12' })?.release_date).toBe(
       '2027-03-12',
     );
+  });
+});
+
+describe('watch targets', () => {
+  it('only takes one Hardcover series, author or list by id', () => {
+    expect(wantedWatchTargetFor('hardcover', 'series', 'id:42', 'Dune')).toEqual({
+      provider: 'hardcover',
+      fields: { series: 'id:42' },
+      label: 'Dune',
+    });
+    expect(wantedWatchTargetFor('hardcover', 'hardcover_list', 'status:1', undefined)?.label).toBe(
+      'status:1',
+    );
+    expect(wantedWatchTargetFor('hardcover', 'series', 'Dune', 'Dune')).toBeNull();
+    expect(wantedWatchTargetFor('openlibrary', 'series', 'id:42', 'Dune')).toBeNull();
+    expect(wantedWatchTargetFor('hardcover', 'title', 'id:42', 'Dune')).toBeNull();
+  });
+
+  it('matches a watch of the same thing', () => {
+    const target = { provider: 'hardcover', fields: { author: 'id:7' }, label: 'Herbert' };
+    expect(isWatchedTarget({ ...target, label: 'Frank Herbert' }, target)).toBe(true);
+    expect(isWatchedTarget({ ...target, fields: { author: 'id:8' } }, target)).toBe(false);
   });
 });

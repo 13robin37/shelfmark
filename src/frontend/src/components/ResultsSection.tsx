@@ -3,11 +3,12 @@ import { useState } from 'react';
 import { useSearchMode } from '../contexts/SearchModeContext';
 import { SORT_OPTIONS } from '../data/filterOptions';
 import { useMediaQuery } from '../hooks/useMediaQuery';
-import type { Book, ButtonStateInfo, SortOption } from '../types';
+import type { Book, ButtonStateInfo, SortOption, WantedWatchTarget } from '../types';
 import { Dropdown } from './Dropdown';
 import { CardView } from './resultsViews/CardView';
 import { CompactView } from './resultsViews/CompactView';
 import { ListView } from './resultsViews/ListView';
+import { WantedWatchActions } from './WantedWatchActions';
 
 // Grid layout classes by view mode
 const GRID_CLASSES = {
@@ -37,6 +38,8 @@ interface ResultsSectionProps {
   directTotalResults?: number | string | null;
   onShowToast?: (message: string, type: 'success' | 'error' | 'info') => void;
   resultsSourceUrl?: string;
+  /** The series, author or list shown, when it can be bookmarked or watched as a whole. */
+  wantedWatchTarget?: WantedWatchTarget | null;
 }
 
 export const ResultsSection = ({
@@ -58,6 +61,7 @@ export const ResultsSection = ({
   directTotalResults,
   onShowToast,
   resultsSourceUrl,
+  wantedWatchTarget,
 }: ResultsSectionProps) => {
   const { searchMode } = useSearchMode();
   const activeViewClasses =
@@ -91,6 +95,7 @@ export const ResultsSection = ({
 
   return (
     <section id="results-section" className="mb-4 w-full sm:mb-8">
+      {wantedWatchTarget && <WantedWatchActions target={wantedWatchTarget} />}
       <div className="relative z-10 mb-2 flex items-center sm:mb-3">
         {/* Left: Sort control or Hardcover link */}
         <div>

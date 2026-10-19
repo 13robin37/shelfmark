@@ -13,6 +13,19 @@ Bookmark an ebook that is not available yet, and Shelfmark downloads it on its o
 
 The eye only appears for ebooks from a metadata provider, and only for users who may download directly from at least one wanted-list source. Users whose policy requires a request do not see it.
 
+## Series, authors and lists
+
+Search Hardcover by a series, an author or one of your lists (pick it from the suggestions). Above the results:
+
+- **Bookmark all missing** bookmarks every book shown that is not in your library yet (up to 200).
+- **Watch for new books** remembers the books there now and bookmarks every book added later: a new volume of a series, a new book by the author, a book you put on your Hardcover list. Watches are checked every 6 hours and listed under **Watching** in the Wanted tab.
+
+Admins can watch for another user (**For …**), for example their Hardcover "Want to Read" list for a family member; those bookmarks download even if that user would otherwise have to request.
+
+## Requests
+
+An admin reviewing a book request (no particular release) can choose **Add to Wanted List**: the request is approved, and the book downloads for the requester once a release turns up, even though the requester could not download it directly.
+
 ## How it searches
 
 1. A bookmarked book is searched within a few minutes, then again after growing intervals (**Search Intervals**, default 1, 6 and 24 hours). The last interval repeats for as long as the book stays bookmarked; a bookmark never gives up.

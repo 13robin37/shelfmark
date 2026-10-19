@@ -103,6 +103,7 @@ _LOCAL_FAILURE_PATTERN = re.compile(
 # A user's own search makes background searches wait, but never longer than this.
 _MAX_YIELD_SECONDS = 30 * 60
 _DUE_BATCH = 5
+_WATCH_INTERVAL = timedelta(hours=6)
 # A release date is checked against the metadata again at least this often.
 _RELEASE_RECHECK = timedelta(days=7)
 # Sources with feeds of their newest releases.
@@ -361,6 +362,7 @@ class WantedScheduler:
         self._detect_source_changes()
         self._continue_cycles()
         self._check_feeds()
+        self._sync_watch()
         # Books not out yet only get their date checked; keep going to one that searches.
         for item in self._service.due_items(now_utc_iso(), _DUE_BATCH):
             if self._should_yield(item) or self.run_cycle(item["id"]):
@@ -397,6 +399,59 @@ class WantedScheduler:
                 self._match_feed(item, fresh, sources)
             except Exception as exc:  # noqa: BLE001 - one item must not cost the others the feed
                 logger.warning("Wanted: feed match failed for %s: %s", item["title"], exc)
+
+    def _sync_watch(self) -> None:
+        """Bookmark what is new in the watched series, author or list synced longest ago."""
+        from shelfmark.core.wanted_watches import (
+            book_data_from_metadata,
+            book_key,
+            fetch_watch_books,
+        )
+
+        synced_before = (datetime.now(UTC) - _WATCH_INTERVAL).isoformat(timespec="seconds")
+        watch = self._service.due_watch(synced_before)
+        if watch is None:
+            return
+        owner = {"user_id": watch.get("user_id"), "approved_by": watch.get("approved_by")}
+        allowed = any(self._users_allowed([owner], source) for source in self._available_sources())
+        try:
+            books = fetch_watch_books(watch["provider"], watch["fields"]) if allowed else []
+        except Exception as exc:  # noqa: BLE001 - a provider outage must not stop the tick
+            logger.warning("Wanted: could not read %s: %s", watch["label"], exc)
+            self._service.update_watch(
+                watch["id"],
+                seen=watch["seen"],
+                last_result=f"Could not read it: {exc}",
+                synced_at=now_utc_iso(),
+            )
+            return
+        seen = set(watch["seen"])
+        added = 0
+        for book in books:
+            if book_key(book) in seen:
+                continue
+            try:
+                self._service.add(
+                    user_id=watch.get("user_id"),
+                    book_data=book_data_from_metadata(book),
+                    approved_by=watch.get("approved_by"),
+                )
+                added += 1
+            except (ValueError, RuntimeError) as exc:
+                logger.warning("Wanted: could not bookmark %s: %s", book.title, exc)
+        if not allowed:
+            result = "Not allowed to download from any wanted-list source"
+        else:
+            result = f"Bookmarked {added} new book(s)" if added else "Nothing new"
+        self._service.update_watch(
+            watch["id"],
+            seen=sorted(seen | {book_key(book) for book in books}),
+            last_result=result,
+            synced_at=now_utc_iso(),
+        )
+        if added:
+            logger.info("Wanted: %s - bookmarked %d new book(s)", watch["label"], added)
+            self._changed(None)
 
     def _fresh_feed_releases(self, sources: list[str]) -> list[Release]:
         from shelfmark.release_sources import get_source
@@ -657,10 +712,12 @@ class WantedScheduler:
         self, subscribers: list[dict[str, Any]], source: str
     ) -> list[dict[str, Any]]:
         auth_mode = self._resolve_auth_mode()
+        # An admin approved the bookmark (an approved request): it may download.
         return [
             sub
             for sub in subscribers
-            if user_may_download(self._user_db, sub.get("user_id"), source, auth_mode=auth_mode)
+            if sub.get("approved_by")
+            or user_may_download(self._user_db, sub.get("user_id"), source, auth_mode=auth_mode)
         ]
 
     @staticmethod

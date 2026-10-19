@@ -449,6 +449,17 @@ Schnittstellen und Einstellungen dazu:
 - Benachrichtigung `wanted_grabbed` („Bookmarked book found“) nur an Vormerker, die diese Quelle
   nutzen dürfen.
 
+- Serien, Autoren und Listen: `POST /api/wanted/bulk` (alle fehlenden vormerken, höchstens 200,
+  Bibliotheksbestand übersprungen), `GET/POST /api/wanted/watches`, `DELETE
+  /api/wanted/watches/<id>`; Tabelle `wanted_watches` (gesehene Bücher, Abgleich alle 6 Stunden).
+  Nur Hardcover und nur id-basierte Felder (`series`/`author` `id:N`, `hardcover_list`
+  `id:N`/`status:N`). Hardcover-Listen gehören zum Hardcover-Konto des API-Schlüssels; statt einer
+  Einstellung legt ein Admin die Beobachtung „für“ einen Nutzer an.
+- Anfragen: `POST /api/admin/requests/<id>/wanted` genehmigt eine Buch-Anfrage (ohne bestimmtes
+  Release) und merkt das Buch für den Anfragenden vor; `wanted_subscribers.approved_by` lässt diese
+  Vormerkung laden, obwohl der Nutzer sonst anfragen müsste (ebenso Beobachtungen, die ein Admin
+  für einen Nutzer anlegt).
+
 Bewusst nicht übernommen: Qualitäts-Upgrades bereits zugestellter Bücher, Wortlisten und Scoring,
 Kalenderseite, Umbenennen/Import (übernehmen Shelfmarks Ausgabemodi), Hörbücher.
 

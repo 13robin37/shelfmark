@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 
+import { useWanted } from '../../contexts/WantedContext';
 import type { RequestRecord } from '../../types';
 import { withBasePath } from '../../utils/basePath';
 import { Tooltip } from '../shared/Tooltip';
@@ -294,6 +295,29 @@ const ReviewInlinePanel = ({
   reviewApproveHandler,
 }: ReviewInlinePanelProps) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { enabled: wantedEnabled, approveRequestToWanted } = useWanted();
+  const book = reviewRecord.book_data;
+  // A book request (no particular release) for a metadata ebook can wait on the wanted list.
+  const canGoOnWantedList =
+    wantedEnabled &&
+    reviewRecord.content_type === 'ebook' &&
+    !reviewRecord.release_data &&
+    typeof book?.provider === 'string' &&
+    book.provider !== 'manual' &&
+    Boolean(book.provider_id);
+
+  const handleWantedList = async () => {
+    if (isSubmitting) {
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const title = typeof book?.title === 'string' ? book.title : 'The book';
+      await approveRequestToWanted(reviewRecord.id, title);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleReviewApprove = async () => {
     if (isSubmitting) {
@@ -375,6 +399,17 @@ const ReviewInlinePanel = ({
         >
           {isSubmitting ? 'Working...' : approveLabel}
         </button>
+        {canGoOnWantedList && (
+          <button
+            type="button"
+            onClick={() => void handleWantedList()}
+            disabled={isSubmitting}
+            title="Approve and let the wanted list download it once a release turns up"
+            className="rounded-md border border-(--border-muted) px-2.5 py-1.5 text-xs transition-colors hover:bg-(--hover-surface) disabled:opacity-50"
+          >
+            {isSubmitting ? 'Working...' : 'Add to Wanted List'}
+          </button>
+        )}
         {canMarkAsApprovedWithoutRelease && (
           <button
             type="button"

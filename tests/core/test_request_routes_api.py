@@ -3242,3 +3242,48 @@ class TestDownloadPolicyGuardsExtended:
                         )
 
         assert resp.status_code == 200
+
+
+class TestRequestToWantedList:
+    def test_admin_puts_a_book_request_on_the_wanted_list(self, main_module, client):
+        user = _create_user(main_module, prefix="reader")
+        admin = _create_user(main_module, prefix="admin", role="admin")
+        policy = _policy(default_ebook="request_book")
+        provider_id = f"ol-{uuid.uuid4().hex[:6]}"
+
+        _set_session(client, user_id=user["username"], db_user_id=user["id"], is_admin=False)
+        with (
+            patch.object(main_module, "get_auth_mode", return_value="builtin"),
+            patch.object(main_module, "load_users_request_policy_settings", return_value=policy),
+            patch(
+                "shelfmark.core.request_routes.load_users_request_policy_settings",
+                return_value=policy,
+            ),
+            patch("shelfmark.core.wanted_config.wanted_enabled", return_value=True),
+        ):
+            request_id = client.post(
+                "/api/requests",
+                json={
+                    "book_data": {
+                        "title": "Wanted Request",
+                        "author": "Some Author",
+                        "content_type": "ebook",
+                        "provider": "openlibrary",
+                        "provider_id": provider_id,
+                    },
+                    "context": {"source": "*", "content_type": "ebook", "request_level": "book"},
+                },
+            ).json["id"]
+
+            assert client.post(f"/api/admin/requests/{request_id}/wanted").status_code == 403
+
+            _set_session(client, user_id=admin["username"], db_user_id=admin["id"], is_admin=True)
+            response = client.post(f"/api/admin/requests/{request_id}/wanted")
+
+        assert response.status_code == 200
+        assert response.json["status"] == "fulfilled"
+        items = main_module.wanted_service.list_items(user_id=user["id"], include_all=False)
+        item = next(item for item in items if item["provider_id"] == provider_id)
+        subscriber = item["subscribers"][0]
+        assert subscriber["user_id"] == user["id"]
+        assert subscriber["approved_by"] == admin["id"]

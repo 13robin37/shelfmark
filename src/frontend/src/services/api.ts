@@ -11,8 +11,11 @@ import type {
   CreateRequestPayload,
   RequestRecord,
   WantedAttempt,
+  WantedBulkResult,
   WantedItem,
   WantedStatus,
+  WantedWatch,
+  WantedWatchTarget,
   RequestSubmissionResult,
   MetadataProvidersResponse,
   MetadataSearchConfig,
@@ -1128,6 +1131,41 @@ export const setWantedLanguages = async (id: number, languages: string[] | null)
     method: 'PATCH',
     body: JSON.stringify({ languages }),
   });
+};
+
+export const listWantedWatches = async (): Promise<WantedWatch[]> => {
+  const response = await fetchJSON<{ watches: WantedWatch[] }>(`${API.wanted}/watches`);
+  return response.watches;
+};
+
+export const watchForWanted = async (
+  target: WantedWatchTarget,
+  userId?: number | null,
+): Promise<WantedWatch> => {
+  const response = await fetchJSON<{ watch: WantedWatch }>(`${API.wanted}/watches`, {
+    method: 'POST',
+    body: JSON.stringify(userId ? { ...target, user_id: userId } : target),
+  });
+  return response.watch;
+};
+
+export const unwatchForWanted = async (watchId: number): Promise<void> => {
+  await fetchJSON<unknown>(`${API.wanted}/watches/${encodeURIComponent(String(watchId))}`, {
+    method: 'DELETE',
+  });
+};
+
+export const bookmarkAllForWanted = async (target: WantedWatchTarget): Promise<WantedBulkResult> =>
+  fetchJSON<WantedBulkResult>(`${API.wanted}/bulk`, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+
+export const requestToWanted = async (requestId: number, adminNote?: string): Promise<void> => {
+  await fetchJSON<unknown>(
+    `${API_BASE}/admin/requests/${encodeURIComponent(String(requestId))}/wanted`,
+    { method: 'POST', body: JSON.stringify(adminNote ? { admin_note: adminNote } : {}) },
+  );
 };
 
 export const clearObtainedWanted = async (): Promise<void> => {

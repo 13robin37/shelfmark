@@ -424,3 +424,49 @@ def test_only_real_release_dates_are_stored(service, users):
         book_data=_book(provider_id="2", isbn_13=None, release_date="soon"),
     )
     assert "release_date" not in other["book_data"]
+
+
+def test_watches_are_kept_once_per_user_and_target(service, users):
+    fields = {"series": "id:42"}
+    watch, created = service.add_watch(
+        user_id=users[0]["id"], provider="hardcover", fields=fields, label="Dune", seen=["a"]
+    )
+    again, created_again = service.add_watch(
+        user_id=users[0]["id"], provider="hardcover", fields=fields, label="Dune", seen=[]
+    )
+    other, _ = service.add_watch(
+        user_id=users[1]["id"], provider="hardcover", fields=fields, label="Dune", seen=[]
+    )
+
+    assert (created, created_again) == (True, False)
+    assert again["id"] == watch["id"] != other["id"]
+    assert watch["seen"] == ["a"]
+    assert [w["id"] for w in service.list_watches(user_id=users[0]["id"], include_all=False)] == [
+        watch["id"]
+    ]
+    assert len(service.list_watches(user_id=None, include_all=True)) == 2
+
+
+def test_the_watch_synced_longest_ago_is_due(service, users):
+    first, _ = service.add_watch(
+        user_id=users[0]["id"], provider="hardcover", fields={"author": "id:1"}, label="A", seen=[]
+    )
+    service.add_watch(
+        user_id=users[0]["id"], provider="hardcover", fields={"author": "id:2"}, label="B", seen=[]
+    )
+    service.update_watch(first["id"], seen=["x"], last_result="Nothing new", synced_at="2000-01-01")
+
+    assert service.due_watch("2999-01-01")["id"] == first["id"]
+    assert service.due_watch("1999-01-01") is None
+    assert service.delete_watch(first["id"]) is True
+    assert service.get_watch(first["id"]) is None
+
+
+def test_an_approval_wakes_a_resting_bookmark(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    service.update_item(item["id"], next_search_at=None)
+
+    service.add(user_id=users[0]["id"], book_data=_book(), approved_by=users[1]["id"])
+
+    assert service.get_item(item["id"])["next_search_at"] is not None
+    assert service.list_subscribers(item["id"])[0]["approved_by"] == users[1]["id"]
