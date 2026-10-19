@@ -766,7 +766,7 @@ export const ActivitySidebar = ({
                   tabRefs.current.all = el;
                 }}
                 onClick={() => handleTabChange('all')}
-                className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+                className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
                   effectiveActiveTab === 'all'
                     ? 'text-sky-600 dark:text-sky-400'
                     : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
@@ -781,7 +781,7 @@ export const ActivitySidebar = ({
                   tabRefs.current.downloads = el;
                 }}
                 onClick={() => handleTabChange('downloads')}
-                className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+                className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
                   effectiveActiveTab === 'downloads'
                     ? 'text-sky-600 dark:text-sky-400'
                     : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
@@ -802,7 +802,7 @@ export const ActivitySidebar = ({
                     tabRefs.current.requests = el;
                   }}
                   onClick={() => handleTabChange('requests')}
-                  className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+                  className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
                     effectiveActiveTab === 'requests'
                       ? 'text-sky-600 dark:text-sky-400'
                       : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
@@ -824,7 +824,7 @@ export const ActivitySidebar = ({
                     tabRefs.current.wanted = el;
                   }}
                   onClick={() => handleTabChange('wanted')}
-                  className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+                  className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
                     effectiveActiveTab === 'wanted'
                       ? 'text-sky-600 dark:text-sky-400'
                       : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
