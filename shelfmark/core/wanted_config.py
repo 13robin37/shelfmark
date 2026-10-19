@@ -41,6 +41,8 @@ def default_format_order() -> list[dict[str, Any]]:
 
 def _ordered_entries(value: object, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
     entries = value if isinstance(value, list) else default
+    # A plain list of ids (e.g. ["epub", "mobi"] from an env var) enables those ids.
+    entries = [{"id": entry} if isinstance(entry, str) else entry for entry in entries]
     return [
         entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     ]

@@ -284,6 +284,15 @@ def test_a_rejected_release_is_skipped_until_the_blocklist_is_cleared(service, u
     assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 7)
 
 
+def test_a_restart_wakes_resting_items(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    service.update_item(item["id"], next_search_at=None)
+
+    service.reset_interrupted()
+
+    assert service.get_item(item["id"])["next_search_at"] is not None
+
+
 def test_a_new_subscriber_wakes_a_resting_item(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     service.update_item(item["id"], next_search_at=None)

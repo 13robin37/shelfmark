@@ -16,7 +16,7 @@ The eye only appears for ebooks from a metadata provider, and only for users who
 2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide. Only enabled formats are downloaded; PDF and comic formats are off by default.
 3. The best release is downloaded. If it fails, the next one is tried. A release that fails in two separate searches is skipped for 30 days. Cancelling a wanted download rejects that release until an admin clicks **Retry failed releases**.
 4. Changing sources, mirrors, indexers, wanted-list sources or formats, or anyone's request policy or role makes every waiting bookmark search again at once, so a newly added source is tried immediately. A bookmark that no available source may serve for its users rests until one of these changes.
-5. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading for users whose downloads go to a folder. Users receiving books by email or in BookLore still get it delivered.
+5. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading for users whose downloads go to a folder. Users receiving books by email or in Grimmory still get it delivered.
 
 Background searches give way to searches users run themselves and are capped by **Max Searches per Hour**. IRC is off by default because its results are cached for 30 days.
 
@@ -24,6 +24,6 @@ Switching the wanted list off stops new searches. Downloads already running fini
 
 ## Several users, one book
 
-A book is searched and downloaded once, however many users bookmarked it. Users who share a destination (for example one Calibre library) all get that one download. Users with a different destination, email recipient, BookLore library or a `{User}` naming template get their own copy of the same file, without downloading it again.
+A book is searched and downloaded once, however many users bookmarked it. Users who share a destination (for example one Calibre library) all get that one download. Users with a different destination, email recipient, Grimmory library or a `{User}` naming template get their own copy of the same file, without downloading it again.
 
 Everyone who receives the book gets a **Bookmarked book obtained** notification (selectable per route under Notifications). Failed single attempts do not notify anyone; a failure on Shelfmark's side, such as a destination that is not writable, notifies the admin.

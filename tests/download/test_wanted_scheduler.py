@@ -866,3 +866,83 @@ def test_a_cancelled_extra_delivery_rejects_the_release(env, two_targets, tmp_pa
     assert env.item(wanted_id)["state"] == STATE_WAITING
     excluded = env.service.excluded_release_keys(wanted_id, 99)
     assert "id:direct_download:aa-1" in excluded
+
+
+def _deny_everyone(env):
+    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+
+
+def test_someone_joining_while_an_item_starts_to_rest_wakes_it(env):
+    _deny_everyone(env)
+    admin = env.user_db.create_user(username="carol", role="admin")
+    wanted_id = env.add()
+
+    def join_during_the_pass(*_args):
+        env.add(user=admin)
+        return False
+
+    with patch("shelfmark.core.library_index.is_in_library", side_effect=join_during_the_pass):
+        env.scheduler.tick()
+    assert env.item(wanted_id)["next_search_at"] is not None
+
+    env.scheduler.tick()
+    assert env.queued[-1][1] == admin["id"]
+
+
+def test_an_auth_mode_change_wakes_resting_items(env):
+    _deny_everyone(env)
+    wanted_id = env.add()
+    env.scheduler.tick()
+    assert env.item(wanted_id)["next_search_at"] is None
+
+    env.scheduler._resolve_auth_mode = lambda: "none"
+    env.scheduler.tick()
+    assert len(env.queued) == 1
+
+
+def test_new_users_without_bookmarks_do_not_reset_backoff(env):
+    env.results = {}
+    wanted_id = env.add()
+    env.scheduler.tick()
+    level = env.item(wanted_id)["backoff_level"]
+
+    env.user_db.create_user(username="dave")
+    env.scheduler.tick()
+
+    assert env.item(wanted_id)["backoff_level"] == level
+
+
+def test_switching_off_during_a_search_queues_nothing(env):
+    enabled = iter([True, False])
+    with patch.object(ws, "wanted_enabled", side_effect=lambda: next(enabled, False)):
+        wanted_id = env.add()
+        env.scheduler.tick()
+
+    assert env.queued == []
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert env.item(wanted_id)["next_search_at"] is not None
+
+
+def test_archives_still_download_with_formats_restricted(env):
+    env.results = {"direct_download": ([_release("aa-zip", fmt="zip")], None)}
+    with patch.object(ws, "supported_formats", return_value=frozenset({"epub", "zip"})):
+        env.add()
+        env.scheduler.tick()
+
+    assert env.queued[-1][0]["source_id"] == "aa-zip"
+
+
+def test_an_unhandled_end_of_an_unwanted_task_is_cleaned_up(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    _downloaded(env, wanted_id, tmp_path)
+    env.service.delete_item(wanted_id)
+    env.queue_statuses["aa-1"] = (None, SimpleNamespace(wanted_id=wanted_id))
+
+    env.scheduler.tick()
+
+    assert env.cancelled == []
+    assert env.scheduler._payloads == {}
+    assert not any((tmp_path / "held").rglob("Dune.epub"))

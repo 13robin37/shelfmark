@@ -25,6 +25,7 @@ from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import TERMINAL_QUEUE_STATUSES, QueueStatus
 from shelfmark.core.release_picker import PickerPreferences, pick_releases, release_match_key
 from shelfmark.core.request_helpers import now_utc_iso
+from shelfmark.core.utils import ARCHIVE_FORMATS
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
 from shelfmark.core.wanted_config import (
     backoff_hours,
@@ -262,13 +263,13 @@ class WantedScheduler:
 
     def tick(self) -> None:
         """One scheduling step: continue running cycles, then start at most one search."""
+        self._service.prune_orphans()
         self._cancel_unwanted()
         self._reconcile_downloads()
         if not wanted_enabled():
             # Downloads already running finish and are recorded; nothing new starts.
             self._park_cycles()
             return
-        self._service.prune_orphans()
         self._detect_source_changes()
         self._continue_cycles()
         due = self._service.due_items(now_utc_iso(), 1)
@@ -300,6 +301,7 @@ class WantedScheduler:
             "sources": self._available_sources(),
             "tabs": {tab: load_config_file(tab) for tab in _SOURCE_SETTINGS_TABS},
             "formats": preferred_formats()[0],
+            "auth": self._resolve_auth_mode(),
             "users": self._user_policies(),
         }
         fingerprint = hashlib.sha256(
@@ -318,14 +320,15 @@ class WantedScheduler:
 
         if self._user_db is None:
             return []
-        return [
-            (
-                user["id"],
-                user.get("role"),
-                filter_request_policy_settings(self._user_db.get_user_settings(user["id"])),
+        # Users without bookmarks cannot change what any item may download.
+        policies: list[tuple[Any, ...]] = []
+        for user_id in sorted(self._service.all_subscriber_ids()):
+            user = self._user_db.get_user(user_id=user_id)
+            settings = self._user_db.get_user_settings(user_id)
+            policies.append(
+                (user_id, user and user.get("role"), filter_request_policy_settings(settings))
             )
-            for user in self._user_db.list_users()
-        ]
+        return policies
 
     def _cancel_unwanted(self) -> None:
         """Cancel downloads of items nobody wants any more."""
@@ -336,23 +339,30 @@ class WantedScheduler:
         for task_id in task_ids:
             status, task = self._task_lookup(task_id)
             wanted_id = _positive_int(getattr(task, "wanted_id", None))
-            if status is None or status in TERMINAL_QUEUE_STATUSES or wanted_id is None:
+            if wanted_id is None or self._service.get_item(wanted_id) is not None:
                 continue
-            if self._service.get_item(wanted_id) is None:
+            if status is not None and status not in TERMINAL_QUEUE_STATUSES:
                 logger.info("Wanted: nobody wants task %s any more; cancelling it", task_id)
                 self._cancel_task(task_id)
+            else:
+                # Its end went unhandled; nothing else will clean up after it now.
+                self._forget_task(task_id)
 
     def _park_cycles(self) -> None:
         for item in self._service.items_in_state(STATE_SEARCHING):
-            self._cycles.pop(item["id"], None)
-            parked = self._service.update_item(
-                item["id"],
-                expected_state=STATE_SEARCHING,
-                state=STATE_WAITING,
-                next_search_at=now_utc_iso(),
-            )
-            if parked is not None:
-                self._changed(item["id"])
+            self._park(item["id"])
+
+    def _park(self, wanted_id: int) -> None:
+        """Stop a cycle while the wanted list is off; it searches again once back on."""
+        self._cycles.pop(wanted_id, None)
+        parked = self._service.update_item(
+            wanted_id,
+            expected_state=STATE_SEARCHING,
+            state=STATE_WAITING,
+            next_search_at=now_utc_iso(),
+        )
+        if parked is not None:
+            self._changed(wanted_id)
 
     def _reconcile_downloads(self) -> None:
         """Finish attempts whose end the terminal hook missed (a crash in it, a lost task)."""
@@ -571,6 +581,12 @@ class WantedScheduler:
                 next_search_at=None,
                 last_result="No source the subscribers may download from is available",
             )
+            searched_for = {sub["id"] for sub in pending}
+            if {sub["id"] for sub in self._pending_subscribers(wanted_id)} - searched_for:
+                # Someone joined while this pass ran; their wake-up did not reach it.
+                self._service.update_item(
+                    wanted_id, expected_state=STATE_WAITING, next_search_at=now_utc_iso()
+                )
             self._changed(wanted_id)
             return
 
@@ -578,7 +594,8 @@ class WantedScheduler:
         releases, answered, failed = self._search(sources, book, pending)
         formats = preferred_formats()[0]
         prefs = PickerPreferences(
-            supported_formats=supported_formats() & frozenset(formats),
+            # Archives are unpacked to their books, so they are no format choice.
+            supported_formats=supported_formats() & {*formats, *ARCHIVE_FORMATS},
             preferred_formats=formats,
             excluded_formats=preferred_formats()[1],
             source_order=tuple(sources),
@@ -670,6 +687,10 @@ class WantedScheduler:
             return
         if cycle is None:
             self._end_cycle(item, found_nothing=True, source_errors=True)
+            return
+        if not wanted_enabled():
+            # Switched off while this pass searched.
+            self._park(wanted_id)
             return
         pending = self._pending_subscribers(wanted_id)
         while cycle.releases:
@@ -981,7 +1002,9 @@ class WantedScheduler:
         with self._delivery_lock:
             self._payloads.pop(task_id, None)
             held = self._held.pop(task_id, [])
-        for _group, copy in held:
+            extra = self._extras.pop(task_id, None)
+        copies = [copy for _group, copy in held] + ([extra[2]] if extra else [])
+        for copy in copies:
             _remove_path(copy.parent)
 
     def _queue_extra_delivery(

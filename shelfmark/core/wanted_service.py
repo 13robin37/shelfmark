@@ -582,6 +582,13 @@ class WantedService:
                     "next_search_at = ?, updated_at = ? WHERE state IN (?, ?)",
                     (STATE_WAITING, now, now, STATE_SEARCHING, STATE_DOWNLOADING),
                 )
+                # Settings may have changed while the server was down; check resting
+                # items again (a check that finds nothing allowed costs no search).
+                conn.execute(
+                    "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
+                    "WHERE state = ? AND next_search_at IS NULL",
+                    (now, now, STATE_WAITING),
+                )
                 conn.commit()
                 return cursor.rowcount
             finally:
