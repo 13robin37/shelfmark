@@ -42,7 +42,7 @@ from shelfmark.release_sources.prowlarr.api import (
     ProwlarrSearchError,
     is_myanonamouse_indexer,
 )
-from shelfmark.release_sources.prowlarr.cache import cache_release
+from shelfmark.release_sources.prowlarr.cache import cache_release, cleanup_expired
 from shelfmark.release_sources.prowlarr.mam import (
     lookup_torrent_details,
     mam_search_options,
@@ -1385,6 +1385,8 @@ class ProwlarrSource(ReleaseSource):
         client = self._get_client()
         if client is None:
             return None
+        # Feed items are cached like search results but rarely read back; drop stale ones.
+        cleanup_expired()
         categories = [3030] if content_type == "audiobook" else [7000]
         try:
             enabled_indexers = client.get_enabled_indexers_detailed(raise_on_error=True)
@@ -1392,7 +1394,14 @@ class ProwlarrSource(ReleaseSource):
             logger.warning("Prowlarr feeds: could not reach Prowlarr: %s", e)
             return []
         indexer_ids = _drop_unknown_indexer_ids(self._get_selected_indexer_ids(), enabled_indexers)
+        without_feed = {
+            indexer_id
+            for indexer in enabled_indexers
+            if indexer.get("supportsRss") is False
+            and (indexer_id := _coerce_indexer_id(indexer.get("id"))) is not None
+        }
         indexer_priority = _build_indexer_priority(enabled_indexers)
+        deadline = time.monotonic() + _search_budget_seconds(client.indexer_timeout)
         enriched = set(
             client.get_enriched_indexer_ids(restrict_to=indexer_ids, indexers=enabled_indexers)
         )
@@ -1408,12 +1417,15 @@ class ProwlarrSource(ReleaseSource):
         )
         raw: list[dict] = []
         for indexer_id in self._get_search_indexer_ids(client, indexer_ids, categories):
-            if indexer_id in disabled_indexers:
+            if indexer_id in disabled_indexers or indexer_id in without_feed:
                 continue
+            if time.monotonic() > deadline:
+                logger.info("Prowlarr feeds: out of time; the remaining indexers wait")
+                break
             try:
                 raw.extend(client.torznab_recent(indexer_id=indexer_id, categories=categories))
             except ProwlarrSearchError as e:
-                logger.debug("Prowlarr feed of indexer %s failed: %s", indexer_id, e)
+                logger.info("Prowlarr feed of indexer %s failed: %s", indexer_id, e)
         if config.get("PROWLARR_COLLAPSE_DUPLICATES", True):
             raw = _collapse_duplicate_indexer_results(raw, indexer_priority)
         releases: list[Release] = []

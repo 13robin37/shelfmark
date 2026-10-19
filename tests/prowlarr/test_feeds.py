@@ -44,9 +44,16 @@ def test_a_feed_read_is_a_search_without_a_query(monkeypatch):
 def test_recent_releases_read_every_selected_indexer(monkeypatch):
     monkeypatch.setattr(prowlarr_source.config, "get", lambda key, default=None: default)
     client = MagicMock()
+    client.indexer_timeout = 30
     client.get_enabled_indexers_detailed.return_value = [
         {"id": 1, "name": "A", "priority": 25, "capabilities": {"categories": [{"id": 7000}]}},
         {"id": 2, "name": "B", "priority": 25, "capabilities": {"categories": [{"id": 7000}]}},
+        {
+            "id": 3,
+            "name": "No feed",
+            "supportsRss": False,
+            "capabilities": {"categories": [{"id": 7000}]},
+        },
     ]
     client.get_enriched_indexer_ids.return_value = []
     client.get_disabled_indexers.return_value = {}
@@ -63,6 +70,7 @@ def test_recent_releases_read_every_selected_indexer(monkeypatch):
     releases = source.recent_releases("ebook")
 
     assert [release.title for release in releases] == ["Dune"]
+    # Indexer 3 has no feed; indexer 2 failed without sinking indexer 1.
     assert client.torznab_recent.call_count == 2
 
 
@@ -70,3 +78,23 @@ def test_no_feed_without_prowlarr(monkeypatch):
     source = ProwlarrSource()
     monkeypatch.setattr(source, "_get_client", lambda: None)
     assert source.recent_releases("ebook") is None
+
+
+def test_newznab_feeds_read_every_connection(monkeypatch):
+    from shelfmark.release_sources.newznab.source import NewznabSource, _NamedClient
+
+    client = MagicMock()
+    client.recent.return_value = [
+        {"title": "Dune", "guid": "g1", "downloadUrl": "https://x/1.nzb", "size": 10}
+    ]
+    source = NewznabSource()
+    monkeypatch.setattr(
+        source,
+        "_get_clients",
+        lambda: [_NamedClient(name="Indexer", connection_id="abc", client=client)],
+    )
+
+    releases = source.recent_releases("ebook")
+
+    assert [release.indexer for release in releases] == ["Indexer"]
+    assert client.recent.call_args.kwargs["categories"]

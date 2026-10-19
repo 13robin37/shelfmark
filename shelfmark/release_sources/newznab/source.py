@@ -30,7 +30,7 @@ from shelfmark.release_sources import (
     register_source,
 )
 from shelfmark.release_sources.newznab.api import NewznabClient
-from shelfmark.release_sources.newznab.cache import cache_release
+from shelfmark.release_sources.newznab.cache import cache_release, cleanup_expired
 from shelfmark.release_sources.prowlarr.source import (
     PROWLARR_SEARCH_TIMEOUT_SECONDS as _SEARCH_TIMEOUT,
 )
@@ -474,6 +474,8 @@ class NewznabSource(ReleaseSource):
         clients = self._get_clients()
         if not clients:
             return None
+        # Feed items are cached like search results but rarely read back; drop stale ones.
+        cleanup_expired()
         categories = _configured_categories(content_type)
         results: list[dict] = []
         for connection in clients:

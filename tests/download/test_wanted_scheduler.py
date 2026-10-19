@@ -1246,9 +1246,14 @@ def feed(env):
         yield source
 
 
+def _searched_once(env, **book):
+    wanted_id = env.add(**book)
+    env.service.update_item(wanted_id, search_count=1, next_search_at="2999-01-01T00:00:00+00:00")
+    return wanted_id
+
+
 def test_a_release_in_a_feed_is_downloaded_for_a_waiting_bookmark(env, feed):
-    wanted_id = env.add()
-    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+    wanted_id = _searched_once(env)
 
     env.scheduler.tick()
 
@@ -1258,15 +1263,19 @@ def test_a_release_in_a_feed_is_downloaded_for_a_waiting_bookmark(env, feed):
 
 
 def test_feeds_are_read_once_per_interval_and_each_release_matched_once(env, feed):
-    wanted_id = env.add()
-    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+    wanted_id = _searched_once(env)
     env.scheduler.tick()
     env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
     env.scheduler.tick()
     assert feed.reads == 1
 
     env.scheduler._feed_checked_at -= 15 * 60
-    env.service.update_item(wanted_id, state=STATE_WAITING, current_task_id=None)
+    env.service.update_item(
+        wanted_id,
+        state=STATE_WAITING,
+        current_task_id=None,
+        next_search_at="2999-01-01T00:00:00+00:00",
+    )
     env.scheduler.tick()
 
     assert feed.reads == 2
@@ -1280,9 +1289,58 @@ def test_feeds_can_be_switched_off(env, feed):
     assert feed.reads == 0
 
 
-def test_feeds_skip_books_not_released_yet(env, feed):
-    wanted_id = env.add(release_date="2999-03-12")
+def test_feeds_skip_books_not_released_yet_and_never_searched(env, feed):
+    unreleased = _searched_once(env, release_date="2999-03-12")
+    fresh = env.add(title="Frank Herbert - Dune", provider_id="2")
+    released = _searched_once(env, provider_id="3")
+    env.service.update_item(released, state="paused")
+
     env.scheduler.tick()
 
-    assert feed.reads == 0
-    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert env.item(unreleased)["state"] == STATE_WAITING
+    # Never searched yet: its own first search runs the metadata checks first.
+    assert all(payload["source"] != "prowlarr" for payload, _, _ in env.queued)
+    assert env.item(fresh)["search_count"] == 1
+
+
+def test_a_failed_feed_release_makes_a_full_search_due(env, feed):
+    wanted_id = _searched_once(env)
+    env.service.update_item(wanted_id, backoff_level=2)
+    env.scheduler.tick()
+
+    env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
+    env.scheduler._continue_cycles()
+
+    item = env.item(wanted_id)
+    assert item["backoff_level"] == 2
+    assert item["last_result"] == "The release from the feed failed"
+    assert item["next_search_at"] < "2999"
+
+
+def test_a_feed_match_for_a_book_in_the_library_leaves_it_to_the_search(env, feed):
+    wanted_id = _searched_once(env)
+    env.in_library = True
+
+    env.scheduler._check_feeds()
+
+    assert env.queued == []
+    assert env.item(wanted_id)["next_search_at"] < "2999"
+
+
+def test_one_failing_match_does_not_cost_the_others_the_feed(env, feed):
+    first = _searched_once(env)
+    second = _searched_once(env, provider_id="2", isbn_13=None)
+    calls = []
+    original = env.scheduler._match_feed
+
+    def flaky(item, fresh, sources):
+        calls.append(item["id"])
+        if item["id"] == first:
+            raise RuntimeError("boom")
+        return original(item, fresh, sources)
+
+    with patch.object(env.scheduler, "_match_feed", side_effect=flaky):
+        env.scheduler._check_feeds()
+
+    assert sorted(calls) == sorted([first, second])
+    assert env.item(second)["state"] == STATE_DOWNLOADING

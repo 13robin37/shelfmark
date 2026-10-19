@@ -1039,7 +1039,7 @@ Custom label for the OIDC sign-in button on the login page.
 | `WANTED_FORMAT_WAIT_DAYS` | Days after bookmarking during which lower formats are skipped. 0 downloads the best format found right away. | number | `0` |
 | `WANTED_SEARCH_BACKOFF_HOURS` | Hours to wait between searches for a book that was not found, comma separated. The last value repeats for as long as the book stays bookmarked. | string | `1, 6, 24` |
 | `WANTED_MAX_SEARCHES_PER_HOUR` | Upper limit for background searches across all bookmarked books. | number | `6` |
-| `WANTED_FEED_INTERVAL_MINUTES` | How often the newest releases of Prowlarr and Newznab indexers are checked against every bookmark. One request per indexer, however many books are bookmarked, and not counted as searches. 0 turns it off. | number | `15` |
+| `WANTED_FEED_INTERVAL_MINUTES` | How often the newest releases of Prowlarr and Newznab indexers are checked against every bookmark: one request per indexer each time (48 a day at 30 minutes), however many books are bookmarked. Mind indexers' daily API limits. 0 turns it off. | number | `30` |
 
 <details>
 <summary>Detailed descriptions</summary>
@@ -1114,10 +1114,10 @@ Upper limit for background searches across all bookmarked books.
 
 **Indexer Feed Interval (minutes)**
 
-How often the newest releases of Prowlarr and Newznab indexers are checked against every bookmark. One request per indexer, however many books are bookmarked, and not counted as searches. 0 turns it off.
+How often the newest releases of Prowlarr and Newznab indexers are checked against every bookmark: one request per indexer each time (48 a day at 30 minutes), however many books are bookmarked. Mind indexers' daily API limits. 0 turns it off.
 
 - **Type:** number
-- **Default:** `15`
+- **Default:** `30`
 - **Constraints:** min: 0, max: 1440
 
 </details>

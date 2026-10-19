@@ -417,7 +417,7 @@ class ProwlarrClient:
         }
         if categories:
             params["cat"] = ",".join(str(c) for c in categories)
-        return self._torznab_get(indexer_id, params)
+        return self._torznab_get(indexer_id, params, quiet=False)
 
     def torznab_recent(
         self, *, indexer_id: int, categories: list[int] | None = None, limit: int = 100
@@ -431,9 +431,12 @@ class ProwlarrClient:
         params: dict[str, Any] = {"t": "search", "limit": limit}
         if categories:
             params["cat"] = ",".join(str(c) for c in categories)
-        return self._torznab_get(indexer_id, params)
+        return self._torznab_get(indexer_id, params, quiet=True)
 
-    def _torznab_get(self, indexer_id: int, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _torznab_get(
+        self, indexer_id: int, params: dict[str, Any], *, quiet: bool
+    ) -> list[dict[str, Any]]:
+        """``quiet``: a routine feed read; its failures are reported by the caller."""
         endpoint = f"/api/v1/indexer/{int(indexer_id)}/newznab"
         url = self.base_url + endpoint
 
@@ -450,7 +453,7 @@ class ProwlarrClient:
                 },
                 verify=get_ssl_verify(url),
             )
-            if not response.ok:
+            if not response.ok and not quiet:
                 with suppress(Exception):
                     error_body = response.text[:500]
                     logger.error("Prowlarr Torznab error response: %s", error_body)
@@ -462,7 +465,7 @@ class ProwlarrClient:
                 if r.get("indexerId") is None:
                     r["indexerId"] = int(indexer_id)
         except requests.exceptions.Timeout as e:
-            logger.warning(
+            (logger.debug if quiet else logger.warning)(
                 "Prowlarr Torznab search for indexer %s timed out after %ss. An indexer "
                 "behind FlareSolverr can need far longer than that on a cold Cloudflare "
                 "challenge - raise PROWLARR_INDEXER_TIMEOUT if this keeps happening.",
@@ -472,7 +475,8 @@ class ProwlarrClient:
             msg = f"indexer {indexer_id} did not respond within {self.indexer_timeout}s"
             raise ProwlarrSearchError(msg) from e
         except Exception as e:
-            logger.exception("Prowlarr Torznab search failed for indexer %s", indexer_id)
+            if not quiet:
+                logger.exception("Prowlarr Torznab search failed for indexer %s", indexer_id)
             msg = f"indexer {indexer_id} search failed: {e}"
             raise ProwlarrSearchError(msg) from e
         else:

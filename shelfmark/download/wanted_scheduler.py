@@ -25,6 +25,7 @@ from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import TERMINAL_QUEUE_STATUSES, QueueStatus
 from shelfmark.core.release_picker import (
     PickerPreferences,
+    may_name_the_book,
     pick_releases,
     rejection_reason,
     release_match_key,
@@ -119,8 +120,8 @@ class _Cycle:
     releases: list[Release] = field(default_factory=list)
     queue_error: str | None = None
     announced: bool = False
-    # A release a user picked: when it fails, the item waits as planned, no backoff.
-    manual: bool = False
+    # "manual" (a user's pick) or "feed": when its releases fail, no backoff follows.
+    origin: str = "search"
 
 
 @dataclass(frozen=True)
@@ -373,12 +374,15 @@ class WantedScheduler:
             self._feed_checked_at is not None and now - self._feed_checked_at < interval * 60
         ):
             return
+        if self._user_searched_recently():
+            return
         self._feed_checked_at = now
         sources = [source for source in self._available_sources() if source in _FEED_SOURCES]
+        # Never-searched items get their first search soon, with the metadata checks.
         items = [
             item
             for item in self._service.items_in_state(STATE_WAITING)
-            if _search_starts(item["book_data"]) is None
+            if int(item.get("search_count") or 0) > 0 and _search_starts(item["book_data"]) is None
         ]
         if not sources or not items:
             return
@@ -389,7 +393,10 @@ class WantedScheduler:
         for item in items:
             # Each match runs the picker; let requests in between on the gevent loop.
             time.sleep(0)
-            self._match_feed(item, fresh)
+            try:
+                self._match_feed(item, fresh, sources)
+            except Exception as exc:  # noqa: BLE001 - one item must not cost the others the feed
+                logger.warning("Wanted: feed match failed for %s: %s", item["title"], exc)
 
     def _fresh_feed_releases(self, sources: list[str]) -> list[Release]:
         from shelfmark.release_sources import get_source
@@ -411,15 +418,16 @@ class WantedScheduler:
             self._feed_seen.pop(next(iter(self._feed_seen)))
         return fresh
 
-    def _match_feed(self, item: dict[str, Any], fresh: list[Release]) -> None:
+    def _match_feed(
+        self, item: dict[str, Any], fresh: list[Release], feed_sources: list[str]
+    ) -> None:
+        candidates = [release for release in fresh if may_name_the_book(release, item["book_data"])]
+        if not candidates:
+            return
         wanted_id = item["id"]
         pending = self._pending_subscribers(wanted_id)
-        sources = [
-            source
-            for source in self._available_sources()
-            if source in _FEED_SOURCES and self._users_allowed(pending, source)
-        ]
-        candidates = [release for release in fresh if release.source in sources]
+        sources = [source for source in feed_sources if self._users_allowed(pending, source)]
+        candidates = [release for release in candidates if release.source in sources]
         if not pending or not candidates:
             return
         prefs = self._preferences(pending, sources)
@@ -432,22 +440,37 @@ class WantedScheduler:
         picked, _hold = self._hold_for_format(picked, pending, prefs.preferred_formats)
         if not picked:
             return
+        if self._in_library(self._book_from_data(item["book_data"])):
+            # The regular search sorts out who already has it.
+            self._service.update_item(
+                wanted_id, expected_state=STATE_WAITING, next_search_at=now_utc_iso()
+            )
+            return
+        from shelfmark.release_sources import get_source_display_name
+
         cycle_number = int(item["search_count"]) + 1
         claimed = self._service.update_item(
             wanted_id,
             expected_state=STATE_WAITING,
             state=STATE_SEARCHING,
             search_count=cycle_number,
-            last_result=f"Found in the {picked[0].source.title()} feed",
+            last_result=f"Found in the {get_source_display_name(picked[0].source)} feed",
         )
         if claimed is None:
             return
         logger.info("Wanted: %s turned up in an indexer feed", item["title"])
         self._cycles[wanted_id] = _Cycle(
-            number=cycle_number, started=time.monotonic(), releases=picked
+            number=cycle_number, started=time.monotonic(), releases=picked, origin="feed"
         )
         self._changed(wanted_id)
         self._try_next(wanted_id)
+
+    @staticmethod
+    def _user_searched_recently() -> bool:
+        from shelfmark.download import warmup
+
+        since_user_search = warmup.seconds_since_user_search()
+        return since_user_search is not None and since_user_search < USER_SEARCH_GRACE_SECONDS
 
     def _should_yield(self, item: dict[str, Any]) -> bool:
         from shelfmark.download import warmup
@@ -656,7 +679,6 @@ class WantedScheduler:
     @staticmethod
     def _resolve_book(book_data: dict[str, Any]) -> BookMetadata:
         from shelfmark.metadata_providers import (
-            BookMetadata,
             get_provider,
             get_provider_kwargs,
             is_provider_registered,
@@ -676,6 +698,15 @@ class WantedScheduler:
                 resolved = None
             if resolved is not None:
                 return resolved
+        return WantedScheduler._book_from_data(book_data)
+
+    @staticmethod
+    def _book_from_data(book_data: dict[str, Any]) -> BookMetadata:
+        """The bookmark's own copy of the book, without asking the provider."""
+        from shelfmark.metadata_providers import BookMetadata
+
+        provider = str(book_data.get("provider") or "")
+        provider_id = str(book_data.get("provider_id") or "")
         raw_authors = book_data.get("authors")
         authors = [str(a) for a in raw_authors] if isinstance(raw_authors, list) else []
         if not authors and isinstance(book_data.get("author"), str):
@@ -973,7 +1004,7 @@ class WantedScheduler:
             )
             if claimed is None:
                 return False, "The wanted list is busy with this book"
-            cycle = _Cycle(number=cycle_number, started=time.monotonic(), manual=True)
+            cycle = _Cycle(number=cycle_number, started=time.monotonic(), origin="manual")
             self._cycles[wanted_id] = cycle
             if self._queue_attempt(claimed, release, owner, cycle_number):
                 return True, None
@@ -1050,13 +1081,18 @@ class WantedScheduler:
             if self._queue_attempt(item, release, owner, cycle.number):
                 return
         self._cycles.pop(wanted_id, None)
-        if cycle.manual:
+        if cycle.origin != "search":
+            # A user's pick keeps the planned search; a feed find makes a full search due.
+            feed = cycle.origin == "feed"
             self._service.update_item(
                 wanted_id,
                 expected_state=STATE_SEARCHING,
                 state=STATE_WAITING,
                 current_task_id=None,
-                last_result="The picked release failed",
+                last_result="The release from the feed failed"
+                if feed
+                else "The picked release failed",
+                **({"next_search_at": now_utc_iso()} if feed else {}),
             )
             self._changed(wanted_id)
             return

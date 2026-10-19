@@ -154,8 +154,9 @@ def wanted_settings() -> list[SettingsField]:
             label="Indexer Feed Interval (minutes)",
             description=(
                 "How often the newest releases of Prowlarr and Newznab indexers are checked "
-                "against every bookmark. One request per indexer, however many books are "
-                "bookmarked, and not counted as searches. 0 turns it off."
+                "against every bookmark: one request per indexer each time (48 a day at 30 "
+                "minutes), however many books are bookmarked. Mind indexers' daily API "
+                "limits. 0 turns it off."
             ),
             default=DEFAULT_FEED_INTERVAL_MINUTES,
             min_value=0,

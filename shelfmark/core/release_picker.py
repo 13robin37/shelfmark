@@ -298,6 +298,16 @@ def _book_numbers(book: dict[str, Any]) -> set[int]:
     return numbers
 
 
+def may_name_the_book(release: Release, book: dict[str, Any]) -> bool:
+    """Cheap pre-check: a release naming the book shares a significant title word with it."""
+    release_words = set(_release_words(release.title))
+    return any(
+        release_words.intersection(_significant(variant))
+        for title in _raw_titles(book)
+        for variant in _word_variants(title)
+    )
+
+
 def names_the_book(release: Release, book: dict[str, Any]) -> bool:
     """Whether a release is this book rather than another work, volume or bundle."""
     return book_mismatch(release, book) is None

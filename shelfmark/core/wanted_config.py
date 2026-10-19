@@ -9,7 +9,7 @@ from shelfmark.core.request_helpers import coerce_bool
 
 DEFAULT_BACKOFF_HOURS: tuple[float, ...] = (1.0, 6.0, 24.0)
 DEFAULT_MAX_SEARCHES_PER_HOUR = 6
-DEFAULT_FEED_INTERVAL_MINUTES = 15
+DEFAULT_FEED_INTERVAL_MINUTES = 30
 _DEFAULT_SOURCES: tuple[tuple[str, bool], ...] = (
     ("direct_download", True),
     ("libgen", True),
