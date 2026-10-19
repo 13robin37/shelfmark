@@ -1,5 +1,12 @@
 import type { WantedBookPayload } from '../services/api';
-import type { Book, ContentType, WantedBookState, WantedItem, WantedState } from '../types';
+import type {
+  Book,
+  ContentType,
+  WantedAttempt,
+  WantedBookState,
+  WantedItem,
+  WantedState,
+} from '../types';
 
 /** Providers whose ids are not metadata books (manual search, source-backed browse). */
 const NON_METADATA_PROVIDERS = new Set(['manual']);
@@ -143,4 +150,84 @@ export const indexOwnWantedItems = (items: WantedItem[]): OwnWantedItems => {
     byKey: new Map(own.map((item) => [wantedKey(item.provider, item.provider_id), item])),
     byId: new Map(own.map((item) => [item.id, item])),
   };
+};
+
+export type WantedFilter = 'all' | 'missing' | 'downloading' | 'obtained' | 'paused';
+export type WantedSort = 'added' | 'next_search' | 'title';
+
+export const WANTED_FILTERS: WantedFilter[] = [
+  'all',
+  'missing',
+  'downloading',
+  'obtained',
+  'paused',
+];
+
+export const WANTED_FILTER_LABELS: Record<WantedFilter, string> = {
+  all: 'All',
+  missing: 'Missing',
+  downloading: 'Downloading',
+  obtained: 'Obtained',
+  paused: 'Paused',
+};
+
+const FILTER_STATES: Record<Exclude<WantedFilter, 'all'>, WantedState[]> = {
+  missing: ['waiting', 'searching'],
+  downloading: ['downloading'],
+  obtained: ['obtained'],
+  paused: ['paused'],
+};
+
+const timeOrNull = (iso: string | null): number | null => {
+  const time = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isNaN(time) ? null : time;
+};
+
+/** Items of one filter, sorted; items without a next search sort last. */
+export const filterAndSortWantedItems = (
+  items: WantedItem[],
+  filter: WantedFilter,
+  sort: WantedSort,
+): WantedItem[] => {
+  const visible =
+    filter === 'all' ? items : items.filter((item) => FILTER_STATES[filter].includes(item.state));
+  const compare = (a: WantedItem, b: WantedItem): number => {
+    if (sort === 'title') {
+      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+    }
+    if (sort === 'next_search') {
+      const left = timeOrNull(a.next_search_at);
+      const right = timeOrNull(b.next_search_at);
+      if (left === null || right === null) {
+        return (left === null ? 1 : 0) - (right === null ? 1 : 0);
+      }
+      return left - right;
+    }
+    return (timeOrNull(b.created_at) ?? 0) - (timeOrNull(a.created_at) ?? 0);
+  };
+  return visible.toSorted(compare);
+};
+
+/** Whether the viewer has obtained books "Clear obtained" would remove. */
+export const hasClearableObtained = (items: WantedItem[], isAdmin: boolean): boolean =>
+  items.some((item) => item.state === 'obtained' && (isAdmin || item.subscribed));
+
+export const WANTED_ATTEMPT_LABELS: Record<WantedAttempt['status'], string> = {
+  queued: 'Downloading',
+  complete: 'Downloaded',
+  error: 'Failed',
+  cancelled: 'Not counted',
+  rejected: 'Cancelled by a user',
+};
+
+/** "blocked until 12 Nov" or "blocked" for a rejected release; null when not blocked. */
+export const describeAttemptBlock = (attempt: WantedAttempt): string | null => {
+  if (!attempt.blocked) {
+    return null;
+  }
+  const until = attempt.blocked_until ? new Date(attempt.blocked_until) : null;
+  if (!until || Number.isNaN(until.getTime())) {
+    return 'Blocked';
+  }
+  return `Blocked until ${until.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
 };

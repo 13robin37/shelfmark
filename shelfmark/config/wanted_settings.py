@@ -5,6 +5,7 @@ from shelfmark.core.settings_registry import (
     HeadingField,
     NumberField,
     OrderableListField,
+    SelectField,
     SettingsField,
     TextField,
     register_settings,
@@ -45,6 +46,13 @@ def _source_options() -> list[dict[str, object]]:
 
 def _format_options() -> list[dict[str, object]]:
     return [{"id": entry["id"], "label": entry["id"].upper()} for entry in default_format_order()]
+
+
+def _cutoff_options() -> list[dict[str, str]]:
+    return [
+        {"value": "", "label": "First preferred format"},
+        *({"value": entry["id"], "label": entry["id"].upper()} for entry in default_format_order()),
+    ]
 
 
 @register_settings("wanted", "Wanted List", icon="eye", order=8)
@@ -90,6 +98,29 @@ def wanted_settings() -> list[SettingsField]:
             ),
             options=_format_options,
             default=default_format_order(),
+            show_when={"field": "WANTED_ENABLED", "value": True},
+        ),
+        SelectField(
+            key="WANTED_FORMAT_CUTOFF",
+            label="Good Enough Format",
+            description=(
+                "While waiting for a better format, only releases in this format or a preferred "
+                "one above it are downloaded."
+            ),
+            options=_cutoff_options,
+            default="",
+            show_when={"field": "WANTED_ENABLED", "value": True},
+        ),
+        NumberField(
+            key="WANTED_FORMAT_WAIT_DAYS",
+            label="Wait for Good Enough Format (days)",
+            description=(
+                "Days after bookmarking during which lower formats are skipped. 0 downloads the "
+                "best format found right away."
+            ),
+            default=0,
+            min_value=0,
+            max_value=90,
             show_when={"field": "WANTED_ENABLED", "value": True},
         ),
         HeadingField(

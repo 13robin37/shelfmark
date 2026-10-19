@@ -41,6 +41,7 @@ def serialize_item(
     """Item as the frontend sees it; subscriber details only for admins."""
     book = item.get("book_data") or {}
     subscribers = item.get("subscribers") or []
+    own = next((sub for sub in subscribers if sub.get("user_id") == viewer_id), None)
     data: dict[str, Any] = {
         "id": item["id"],
         "title": item["title"],
@@ -59,7 +60,8 @@ def serialize_item(
         "attempt_count": item.get("attempt_count", 0),
         "created_at": item.get("created_at"),
         "subscriber_count": len(subscribers),
-        "subscribed": any(sub.get("user_id") == viewer_id for sub in subscribers),
+        "subscribed": own is not None,
+        "languages": own.get("languages") if own else None,
     }
     if is_admin:
         data["current_task_id"] = item.get("current_task_id")
@@ -67,6 +69,7 @@ def serialize_item(
             {
                 "user_id": sub.get("user_id"),
                 "username": sub.get("username"),
+                "languages": sub.get("languages"),
                 "delivered_at": sub.get("delivered_at"),
             }
             for sub in subscribers
@@ -209,6 +212,34 @@ def register_wanted_routes(
         _changed(wanted_id)
         return jsonify({"status": "removed"})
 
+    @app.route("/api/wanted/<int:wanted_id>", methods=["PATCH"])
+    def api_wanted_update(wanted_id: int) -> ResponseReturnValue:
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or "languages" not in payload:
+            return _error("Expected a JSON object with languages", 400)
+        if _item_for_viewer(wanted_id, viewer_id, is_admin) is None:
+            return _error("Wanted item not found", 404)
+        try:
+            updated = wanted_service.set_languages(wanted_id, viewer_id, payload["languages"])
+        except WantedServiceError as exc:
+            return _error(str(exc), exc.status_code)
+        if not updated:
+            return _error("You have not bookmarked this book", 404)
+        _changed(wanted_id)
+        return jsonify({"status": "updated"})
+
+    @app.route("/api/wanted/obtained", methods=["DELETE"])
+    def api_wanted_clear_obtained() -> ResponseReturnValue:
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        cleared = wanted_service.clear_obtained(viewer_id, everyone=is_admin)
+        _changed(None)
+        return jsonify({"status": "cleared", "cleared": cleared})
+
     @app.route("/api/wanted/<int:wanted_id>/search", methods=["POST"])
     def api_wanted_search_now(wanted_id: int) -> ResponseReturnValue:
         viewer_id, is_admin, gate = _viewer()
@@ -290,3 +321,16 @@ def register_wanted_routes(
                 for attempt in attempts
             ]
         return jsonify({"attempts": attempts})
+
+    @app.route("/api/wanted/<int:wanted_id>/attempts/<int:attempt_id>/block", methods=["DELETE"])
+    def api_wanted_unblock_release(wanted_id: int, attempt_id: int) -> ResponseReturnValue:
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        if not is_admin:
+            return _error("Admin access required", 403)
+        if _item_for_viewer(wanted_id, viewer_id, is_admin) is None:
+            return _error("Wanted item not found", 404)
+        cleared = wanted_service.unblock_release(wanted_id, attempt_id)
+        _changed(wanted_id)
+        return jsonify({"status": "cleared", "cleared": cleared})

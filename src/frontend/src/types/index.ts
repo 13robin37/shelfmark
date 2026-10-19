@@ -555,7 +555,26 @@ export interface WantedBookState {
 interface WantedSubscriber {
   user_id: number | null;
   username: string | null;
+  languages: string[] | null;
   delivered_at: string | null;
+}
+
+export type WantedAttemptStatus = 'queued' | 'complete' | 'error' | 'cancelled' | 'rejected';
+
+export interface WantedAttempt {
+  id: number;
+  cycle: number;
+  source: string;
+  release_title: string | null;
+  format: string | null;
+  size: string | null;
+  indexer?: string | null;
+  status: WantedAttemptStatus;
+  error_message: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+  blocked: boolean;
+  blocked_until: string | null;
 }
 
 export interface WantedItem {
@@ -577,6 +596,8 @@ export interface WantedItem {
   created_at: string | null;
   subscriber_count: number;
   subscribed: boolean;
+  /** The viewer's own language choice; null means their default languages. */
+  languages: string[] | null;
   current_task_id?: string | null;
   subscribers?: WantedSubscriber[];
 }

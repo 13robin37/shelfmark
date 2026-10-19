@@ -225,3 +225,52 @@ def test_no_auth_mode_works_without_a_session(env):
     items = client.get("/api/wanted").get_json()["items"]
     assert items[0]["subscribed"] is True
     assert client.delete(f"/api/wanted/{items[0]['id']}").status_code == 200
+
+
+def test_languages_can_be_changed_by_a_subscriber(env):
+    client = env["client"]
+    _login(env, env["alice"])
+    item_id = client.post("/api/wanted", json={"book": BOOK}).get_json()["item"]["id"]
+
+    assert client.patch(f"/api/wanted/{item_id}", json={"languages": ["de"]}).status_code == 200
+    assert client.get("/api/wanted").get_json()["items"][0]["languages"] == ["de"]
+    assert client.patch(f"/api/wanted/{item_id}", json={"languages": "de"}).status_code == 400
+
+    _login(env, env["bob"])
+    assert client.patch(f"/api/wanted/{item_id}", json={"languages": ["en"]}).status_code == 404
+
+
+def test_obtained_books_are_cleared_per_viewer(env):
+    client = env["client"]
+    _login(env, env["alice"])
+    item_id = client.post("/api/wanted", json={"book": BOOK}).get_json()["item"]["id"]
+    env["service"].update_item(item_id, state="obtained")
+
+    assert client.delete("/api/wanted/obtained").status_code == 200
+    assert env["service"].get_item(item_id) is None
+
+
+def test_only_admins_allow_a_release_again(env):
+    client = env["client"]
+    _login(env, env["alice"])
+    item_id = client.post("/api/wanted", json={"book": BOOK}).get_json()["item"]["id"]
+    service = env["service"]
+    service.record_attempt(
+        item_id,
+        cycle=1,
+        source="direct_download",
+        source_id="md5a",
+        match_key=None,
+        release_title="Dune",
+        file_format="epub",
+        size=None,
+        indexer=None,
+    )
+    service.finish_attempt(item_id, "md5a", "rejected", "Cancelled")
+    attempt_id = service.list_attempts(item_id)[0]["id"]
+    url = f"/api/wanted/{item_id}/attempts/{attempt_id}/block"
+
+    assert client.delete(url).status_code == 403
+    _login(env, env["admin"], is_admin=True)
+    assert client.delete(url).get_json()["cleared"] == 1
+    assert service.list_attempts(item_id) == []

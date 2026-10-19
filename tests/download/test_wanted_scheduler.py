@@ -946,3 +946,64 @@ def test_an_unhandled_end_of_an_unwanted_task_is_cleaned_up(env, two_targets, tm
     assert env.cancelled == []
     assert env.scheduler._payloads == {}
     assert not any((tmp_path / "held").rglob("Dune.epub"))
+
+
+def test_finding_a_release_is_announced_once_per_search(env):
+    sent: list[tuple[str, int | None, str]] = []
+    with (
+        patch(
+            "shelfmark.core.notifications.notify_admin",
+            side_effect=lambda event, ctx: sent.append((event.value, None, ctx.detail)),
+        ),
+        patch(
+            "shelfmark.core.notifications.notify_user",
+            side_effect=lambda user_id, event, ctx: sent.append((event.value, user_id, ctx.detail)),
+        ),
+        patch("shelfmark.release_sources.get_source_display_name", return_value="Anna's Archive"),
+    ):
+        wanted_id = env.add()
+        env.scheduler.tick()
+        env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
+        env.scheduler.tick()
+
+    assert len(env.queued) == 2
+    assert sent == [
+        ("wanted_grabbed", None, "Anna's Archive"),
+        ("wanted_grabbed", env.alice["id"], "Anna's Archive"),
+    ]
+
+
+def test_lower_formats_wait_for_the_good_enough_one(env):
+    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
+    with patch.object(ws, "format_wait", return_value=(None, 7.0)):
+        wanted_id = env.add()
+        env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert env.queued == []
+    assert item["last_result"].startswith("Only MOBI found; waiting for EPUB until ")
+    assert item["state"] == STATE_WAITING
+
+
+def test_the_wait_for_a_format_ends(env):
+    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
+    env.add()
+    with (
+        patch.object(ws, "format_wait", return_value=("mobi", 7.0)),
+        patch.object(
+            env.service,
+            "list_subscribers",
+            side_effect=lambda _id: [
+                {
+                    "id": 1,
+                    "user_id": env.alice["id"],
+                    "username": "alice",
+                    "created_at": "2000-01-01T00:00:00+00:00",
+                    "delivered_at": None,
+                }
+            ],
+        ),
+    ):
+        env.scheduler.tick()
+
+    assert env.queued[-1][0]["source_id"] == "aa-mobi"

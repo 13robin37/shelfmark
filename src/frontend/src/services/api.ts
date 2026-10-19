@@ -9,6 +9,7 @@ import type {
   RequestPolicyResponse,
   CreateRequestPayload,
   RequestRecord,
+  WantedAttempt,
   WantedItem,
   WantedStatus,
   RequestSubmissionResult,
@@ -1113,11 +1114,35 @@ export interface WantedBookPayload {
 
 export const addWanted = async (
   book: WantedBookPayload,
+  languages?: string[] | null,
 ): Promise<{ item: WantedItem; created: boolean }> =>
   fetchJSON<{ item: WantedItem; created: boolean }>(API.wanted, {
     method: 'POST',
-    body: JSON.stringify({ book }),
+    body: JSON.stringify(languages ? { book, languages } : { book }),
   });
+
+export const setWantedLanguages = async (id: number, languages: string[] | null): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id), {
+    method: 'PATCH',
+    body: JSON.stringify({ languages }),
+  });
+};
+
+export const clearObtainedWanted = async (): Promise<void> => {
+  await fetchJSON<unknown>(`${API.wanted}/obtained`, { method: 'DELETE' });
+};
+
+export const getWantedAttempts = async (id: number): Promise<WantedAttempt[]> => {
+  const response = await fetchJSON<{ attempts: WantedAttempt[] }>(wantedItemUrl(id, 'attempts'));
+  return response.attempts;
+};
+
+export const unblockWantedRelease = async (id: number, attemptId: number): Promise<void> => {
+  await fetchJSON<unknown>(
+    wantedItemUrl(id, `attempts/${encodeURIComponent(String(attemptId))}/block`),
+    { method: 'DELETE' },
+  );
+};
 
 export const removeWanted = async (id: number, scope?: 'all'): Promise<void> => {
   await fetchJSON<unknown>(`${wantedItemUrl(id)}${scope ? `?scope=${scope}` : ''}`, {

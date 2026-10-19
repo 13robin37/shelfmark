@@ -1724,7 +1724,11 @@ const ReleaseModalSession = ({
                     )}
                     {(onRequestBook || bookSupportsTargets(book) || canBookmarkBook(book)) && (
                       <span className="inline-flex items-center gap-3">
-                        <WantedToggleButton book={book} variant="pill" />
+                        <WantedToggleButton
+                          book={book}
+                          variant="pill"
+                          languages={resolvedLanguageCodes}
+                        />
                         {onRequestBook && (
                           <button
                             type="button"

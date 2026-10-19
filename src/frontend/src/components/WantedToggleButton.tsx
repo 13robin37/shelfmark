@@ -7,6 +7,8 @@ interface WantedToggleButtonProps {
   book: Book;
   variant?: 'icon' | 'pill';
   className?: string;
+  /** Languages to want the book in instead of the viewer's defaults. */
+  languages?: string[] | null;
 }
 
 export const EyeIcon = ({
@@ -56,6 +58,7 @@ export const WantedToggleButton = ({
   book,
   variant = 'icon',
   className,
+  languages,
 }: WantedToggleButtonProps) => {
   const { canBookmarkBook, stateFor, toggle } = useWanted();
   const [busy, setBusy] = useState(false);
@@ -72,7 +75,7 @@ export const WantedToggleButton = ({
       return;
     }
     setBusy(true);
-    void toggle(book).finally(() => setBusy(false));
+    void toggle(book, languages).finally(() => setBusy(false));
   };
 
   if (variant === 'pill') {

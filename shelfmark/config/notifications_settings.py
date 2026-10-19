@@ -28,6 +28,7 @@ _ADMIN_EVENT_OPTIONS = [
     {"value": NotificationEvent.DOWNLOAD_COMPLETE.value, "label": "Download complete"},
     {"value": NotificationEvent.DOWNLOAD_FAILED.value, "label": "Download failed"},
     {"value": NotificationEvent.WANTED_OBTAINED.value, "label": "Bookmarked book obtained"},
+    {"value": NotificationEvent.WANTED_GRABBED.value, "label": "Bookmarked book found"},
 ]
 _ROUTE_EVENT_OPTIONS = [
     {"value": _ROUTE_EVENT_ALL, "label": "All"},

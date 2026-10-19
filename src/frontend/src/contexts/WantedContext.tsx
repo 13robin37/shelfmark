@@ -4,15 +4,26 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState } fro
 import { useDependencyEffect } from '../hooks/useMountEffect';
 import {
   addWanted,
+  clearObtainedWanted,
   clearWantedBlocklist,
+  getWantedAttempts,
   getWantedStatus,
   listWanted,
   pauseWanted,
   removeWanted,
   resumeWanted,
   searchWantedNow,
+  setWantedLanguages,
+  unblockWantedRelease,
 } from '../services/api';
-import type { Book, ContentType, WantedBookState, WantedItem } from '../types';
+import type {
+  Book,
+  ContentType,
+  Language,
+  WantedAttempt,
+  WantedBookState,
+  WantedItem,
+} from '../types';
 import {
   buildWantedBookPayload,
   indexOwnWantedItems,
@@ -31,12 +42,19 @@ interface WantedContextValue {
   items: WantedItem[];
   loading: boolean;
   canBookmarkBook: (book: Book) => boolean;
+  bookLanguages: Language[];
+  defaultLanguageCodes: string[];
   stateFor: (book: Book) => WantedBookState | undefined;
-  toggle: (book: Book) => Promise<void>;
+  /** ``languages`` overrides the viewer's default languages for this book. */
+  toggle: (book: Book, languages?: string[] | null) => Promise<void>;
   remove: (item: WantedItem, scope?: 'all') => Promise<void>;
   searchNow: (item: WantedItem) => Promise<void>;
   setPaused: (item: WantedItem, paused: boolean) => Promise<void>;
   clearBlocklist: (item: WantedItem) => Promise<void>;
+  setLanguages: (item: WantedItem, languages: string[] | null) => Promise<void>;
+  clearObtained: () => Promise<void>;
+  loadAttempts: (item: WantedItem) => Promise<WantedAttempt[]>;
+  unblockRelease: (item: WantedItem, attempt: WantedAttempt) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -49,12 +67,18 @@ const DISABLED_VALUE: WantedContextValue = {
   items: [],
   loading: false,
   canBookmarkBook: () => false,
+  bookLanguages: [],
+  defaultLanguageCodes: [],
   stateFor: () => undefined,
   toggle: async () => undefined,
   remove: async () => undefined,
   searchNow: async () => undefined,
   setPaused: async () => undefined,
   clearBlocklist: async () => undefined,
+  setLanguages: async () => undefined,
+  clearObtained: async () => undefined,
+  loadAttempts: async () => [],
+  unblockRelease: async () => undefined,
   refresh: async () => undefined,
 };
 
@@ -69,6 +93,8 @@ interface WantedProviderProps {
   settingsVersion: number;
   isAdmin: boolean;
   contentType: ContentType;
+  bookLanguages: Language[];
+  defaultLanguageCodes: string[];
   onShowToast: ShowToast;
   children: ReactNode;
 }
@@ -78,6 +104,8 @@ export function WantedProvider({
   settingsVersion,
   isAdmin,
   contentType,
+  bookLanguages,
+  defaultLanguageCodes,
   onShowToast,
   children,
 }: WantedProviderProps) {
@@ -166,7 +194,7 @@ export function WantedProvider({
   );
 
   const toggle = useCallback(
-    async (book: Book) => {
+    async (book: Book, languages?: string[] | null) => {
       if (!book.provider || !book.provider_id) {
         return;
       }
@@ -184,7 +212,7 @@ export function WantedProvider({
         return;
       }
       await run(async () => {
-        const { item } = await addWanted(payload);
+        const { item } = await addWanted(payload, languages);
         setLinkedIds((prev) => new Map(prev).set(key, item.id));
         setOverrides((prev) =>
           new Map(prev).set(key, {
@@ -206,6 +234,8 @@ export function WantedProvider({
       items,
       loading,
       canBookmarkBook,
+      bookLanguages,
+      defaultLanguageCodes,
       stateFor,
       toggle,
       remove: (item, scope) =>
@@ -218,6 +248,18 @@ export function WantedProvider({
           () => clearWantedBlocklist(item.id),
           `Failed and cancelled releases of "${item.title}" may be tried again`,
         ),
+      setLanguages: (item, languages) =>
+        run(
+          () => setWantedLanguages(item.id, languages),
+          `Searching for "${item.title}" in the new languages`,
+        ),
+      clearObtained: () => run(() => clearObtainedWanted(), 'Removed obtained books'),
+      loadAttempts: (item) => getWantedAttempts(item.id),
+      unblockRelease: (item, attempt) =>
+        run(
+          () => unblockWantedRelease(item.id, attempt.id),
+          `"${attempt.release_title ?? 'Release'}" may be tried again`,
+        ),
       refresh,
     }),
     [
@@ -227,6 +269,8 @@ export function WantedProvider({
       items,
       loading,
       canBookmarkBook,
+      bookLanguages,
+      defaultLanguageCodes,
       stateFor,
       toggle,
       run,

@@ -1035,6 +1035,8 @@ Custom label for the OIDC sign-in button on the login page.
 | `WANTED_ENABLED` | Let users bookmark ebooks. Shelfmark then searches the sources below in the background, downloads the best matching release and keeps looking until the book is obtained, including when new sources or releases appear. | boolean | `false` |
 | `WANTED_SOURCES` | Sources searched for bookmarked books, in order of preference. IRC is off by default: its results are cached for 30 days and identical searches are limited. | JSON array | _see UI for defaults_ |
 | `WANTED_PREFERRED_FORMATS` | Formats in order of preference. Only enabled formats are downloaded automatically; PDF and comic formats are off by default. Formats must also be allowed under Supported Book Formats. | JSON array | _see UI for defaults_ |
+| `WANTED_FORMAT_CUTOFF` | While waiting for a better format, only releases in this format or a preferred one above it are downloaded. | string (choice) | _empty string_ |
+| `WANTED_FORMAT_WAIT_DAYS` | Days after bookmarking during which lower formats are skipped. 0 downloads the best format found right away. | number | `0` |
 | `WANTED_SEARCH_BACKOFF_HOURS` | Hours to wait between searches for a book that was not found, comma separated. The last value repeats for as long as the book stays bookmarked. | string | `1, 6, 24` |
 | `WANTED_MAX_SEARCHES_PER_HOUR` | Upper limit for background searches across all bookmarked books. | number | `6` |
 
@@ -1067,6 +1069,26 @@ Formats in order of preference. Only enabled formats are downloaded automaticall
 
 - **Type:** JSON array
 - **Default:** _see UI for defaults_
+
+#### `WANTED_FORMAT_CUTOFF`
+
+**Good Enough Format**
+
+While waiting for a better format, only releases in this format or a preferred one above it are downloaded.
+
+- **Type:** string (choice)
+- **Default:** _empty string_
+- **Options:** `""` (First preferred format), `epub` (EPUB), `azw3` (AZW3), `mobi` (MOBI), `fb2` (FB2), `pdf` (PDF), `djvu` (DJVU), `cbz` (CBZ), `cbr` (CBR)
+
+#### `WANTED_FORMAT_WAIT_DAYS`
+
+**Wait for Good Enough Format (days)**
+
+Days after bookmarking during which lower formats are skipped. 0 downloads the best format found right away.
+
+- **Type:** number
+- **Default:** `0`
+- **Constraints:** min: 0, max: 90
 
 #### `WANTED_SEARCH_BACKOFF_HOURS`
 

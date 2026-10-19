@@ -300,10 +300,7 @@ class WantedService:
                             (now, now, wanted_id, STATE_WAITING),
                         )
                 elif normalized_languages is not None:
-                    conn.execute(
-                        "UPDATE wanted_subscribers SET languages = ? WHERE id = ?",
-                        (json.dumps(normalized_languages), subscriber["id"]),
-                    )
+                    self._set_languages(conn, wanted_id, subscriber["id"], normalized_languages)
                 conn.commit()
                 item = self._get_item(conn, wanted_id)
             finally:
@@ -653,45 +650,159 @@ class WantedService:
             finally:
                 conn.close()
 
-    def excluded_release_keys(self, wanted_id: int, cycle: int) -> set[str]:
-        """Keys of releases not to try now: blocked for good, or already tried this cycle."""
+    def _attempt_rows(self, wanted_id: int) -> list[sqlite3.Row]:
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT cycle, source, source_id, match_key, status, finished_at "
-                "FROM wanted_attempts WHERE wanted_id = ?",
+            return conn.execute(
+                "SELECT * FROM wanted_attempts WHERE wanted_id = ? ORDER BY id DESC",
                 (wanted_id,),
             ).fetchall()
         finally:
             conn.close()
+
+    @staticmethod
+    def _blocked_keys(rows: list[sqlite3.Row]) -> dict[str, str | None]:
+        """Blocked release keys with when the block ends; None while it is rejected."""
         expiry = (datetime.now(UTC) - timedelta(days=BLOCK_EXPIRY_DAYS)).isoformat(
             timespec="seconds"
         )
-        failed_cycles: dict[str, set[int]] = {}
-        excluded: set[str] = set()
+        # Per key, when each cycle that failed the release last failed it.
+        failures: dict[str, dict[int, str]] = {}
+        blocked: dict[str, str | None] = {}
         for row in rows:
             keys = release_attempt_keys(row["source"], row["source_id"], row["match_key"])
-            if row["cycle"] == cycle or row["status"] == ATTEMPT_REJECTED:
-                excluded |= keys
-            if row["status"] == ATTEMPT_ERROR and (row["finished_at"] or "") >= expiry:
+            if row["status"] == ATTEMPT_REJECTED:
+                blocked.update(dict.fromkeys(keys))
+            finished = row["finished_at"] or ""
+            if row["status"] == ATTEMPT_ERROR and finished >= expiry:
                 for key in keys:
-                    failed_cycles.setdefault(key, set()).add(int(row["cycle"]))
-        excluded |= {
-            key for key, cycles in failed_cycles.items() if len(cycles) >= BLOCK_AFTER_FAILED_CYCLES
-        }
+                    cycles = failures.setdefault(key, {})
+                    cycles[int(row["cycle"])] = max(cycles.get(int(row["cycle"]), ""), finished)
+        for key, cycles in failures.items():
+            if len(cycles) < BLOCK_AFTER_FAILED_CYCLES or key in blocked:
+                continue
+            # The block lifts once all but one of its failed cycles have expired.
+            deciding = sorted(cycles.values(), reverse=True)[BLOCK_AFTER_FAILED_CYCLES - 1]
+            until = datetime.fromisoformat(deciding) + timedelta(days=BLOCK_EXPIRY_DAYS)
+            blocked[key] = until.isoformat(timespec="seconds")
+        return blocked
+
+    def excluded_release_keys(self, wanted_id: int, cycle: int) -> set[str]:
+        """Keys of releases not to try now: blocked, or already tried this cycle."""
+        rows = self._attempt_rows(wanted_id)
+        excluded = set(self._blocked_keys(rows))
+        for row in rows:
+            if row["cycle"] == cycle:
+                excluded |= release_attempt_keys(row["source"], row["source_id"], row["match_key"])
         return excluded
 
     def list_attempts(self, wanted_id: int, limit: int = 50) -> list[dict[str, Any]]:
-        """Most recent attempts for an item."""
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM wanted_attempts WHERE wanted_id = ? ORDER BY id DESC LIMIT ?",
-                (wanted_id, limit),
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        """Most recent attempts for an item, each saying whether its release is blocked."""
+        rows = self._attempt_rows(wanted_id)
+        blocked = self._blocked_keys(rows)
+        attempts: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            keys = release_attempt_keys(row["source"], row["source_id"], row["match_key"]) & set(
+                blocked
+            )
+            attempt = dict(row)
+            attempt["blocked"] = bool(keys)
+            ends = [blocked[key] for key in keys]
+            expiring = [end for end in ends if end is not None]
+            # A rejection (no end) outlasts any expiring block.
+            attempt["blocked_until"] = (
+                max(expiring) if expiring and len(expiring) == len(ends) else None
+            )
+            attempts.append(attempt)
+        return attempts
+
+    def unblock_release(self, wanted_id: int, attempt_id: int) -> int:
+        """Forget the failures and rejections of the release behind one attempt."""
+        rows = self._attempt_rows(wanted_id)
+        target = next((row for row in rows if row["id"] == attempt_id), None)
+        if target is None:
+            return 0
+        keys = release_attempt_keys(target["source"], target["source_id"], target["match_key"])
+        ids = [
+            row["id"]
+            for row in rows
+            if row["status"] in (ATTEMPT_ERROR, ATTEMPT_REJECTED)
+            and release_attempt_keys(row["source"], row["source_id"], row["match_key"]) & keys
+        ]
+        if not ids:
+            return 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                placeholders = ", ".join("?" for _ in ids)
+                cursor = conn.execute(
+                    f"DELETE FROM wanted_attempts WHERE id IN ({placeholders})",  # noqa: S608
+                    ids,
+                )
+                conn.commit()
+                return cursor.rowcount
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _set_languages(
+        conn: sqlite3.Connection, wanted_id: int, subscriber_id: int, languages: list[str] | None
+    ) -> None:
+        now = now_utc_iso()
+        conn.execute(
+            "UPDATE wanted_subscribers SET languages = ? WHERE id = ?",
+            (json.dumps(languages) if languages else None, subscriber_id),
+        )
+        # Other languages may find what the last searches did not.
+        conn.execute(
+            "UPDATE wanted_items SET next_search_at = ?, backoff_level = 0, updated_at = ? "
+            "WHERE id = ? AND state = ?",
+            (now, now, wanted_id, STATE_WAITING),
+        )
+
+    def set_languages(self, wanted_id: int, user_id: int | None, languages: object) -> bool:
+        """Change the languages one subscriber wants the book in; None means their default."""
+        normalized = _normalize_languages(languages)
+        with self._lock:
+            conn = self._connect()
+            try:
+                subscriber = conn.execute(
+                    "SELECT id FROM wanted_subscribers "
+                    "WHERE wanted_id = ? AND IFNULL(user_id, 0) = IFNULL(?, 0)",
+                    (wanted_id, user_id),
+                ).fetchone()
+                if subscriber is None:
+                    return False
+                self._set_languages(conn, wanted_id, subscriber["id"], normalized)
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    def clear_obtained(self, user_id: int | None, *, everyone: bool) -> int:
+        """Drop obtained items: for everyone, or only ``user_id``'s bookmarks of them."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                if everyone:
+                    cursor = conn.execute(
+                        "DELETE FROM wanted_items WHERE state = ?", (STATE_OBTAINED,)
+                    )
+                else:
+                    cursor = conn.execute(
+                        "DELETE FROM wanted_subscribers WHERE IFNULL(user_id, 0) = IFNULL(?, 0) "
+                        "AND wanted_id IN (SELECT id FROM wanted_items WHERE state = ?)",
+                        (user_id, STATE_OBTAINED),
+                    )
+                    conn.execute(
+                        "DELETE FROM wanted_items WHERE state = ? AND NOT EXISTS "
+                        "(SELECT 1 FROM wanted_subscribers s WHERE s.wanted_id = wanted_items.id)",
+                        (STATE_OBTAINED,),
+                    )
+                conn.commit()
+                return cursor.rowcount
+            finally:
+                conn.close()
 
     def clear_blocklist(self, wanted_id: int) -> int:
         """Forget failed and rejected attempts so those releases may be tried again."""

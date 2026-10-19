@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Book, WantedBookState, WantedItem } from '../types/index';
+import type { Book, WantedAttempt, WantedBookState, WantedItem } from '../types/index';
 import {
   buildWantedBookPayload,
+  describeAttemptBlock,
   describeWantedItem,
+  filterAndSortWantedItems,
+  hasClearableObtained,
   formatRelativeTime,
   indexOwnWantedItems,
   isBookmarkable,
@@ -41,6 +44,7 @@ const item = (overrides: Partial<WantedItem> = {}): WantedItem => ({
   created_at: null,
   subscriber_count: 1,
   subscribed: true,
+  languages: null,
   ...overrides,
 });
 
@@ -160,5 +164,73 @@ describe('describeWantedItem', () => {
       ),
     ).toBe('Searched 2 source(s), no matching release · next search in 6 h');
     expect(describeWantedItem(item(), now)).toBe('Waiting for the first search');
+  });
+});
+
+const ids = (list: WantedItem[]) => list.map((entry) => entry.id);
+
+const attempt = (overrides: Partial<WantedAttempt>): WantedAttempt => ({
+  id: 1,
+  cycle: 1,
+  source: 'libgen',
+  release_title: 'Dune',
+  format: 'epub',
+  size: null,
+  status: 'error',
+  error_message: null,
+  created_at: null,
+  finished_at: null,
+  blocked: false,
+  blocked_until: null,
+  ...overrides,
+});
+
+describe('filterAndSortWantedItems', () => {
+  const items = [
+    item({ id: 1, title: 'beta', state: 'waiting', created_at: '2026-10-01T00:00:00+00:00' }),
+    item({
+      id: 2,
+      title: 'Alpha',
+      state: 'obtained',
+      created_at: '2026-10-03T00:00:00+00:00',
+    }),
+    item({
+      id: 3,
+      title: 'Gamma',
+      state: 'searching',
+      created_at: '2026-10-02T00:00:00+00:00',
+      next_search_at: '2026-10-20T00:00:00+00:00',
+    }),
+  ];
+
+  it('filters by state group', () => {
+    expect(ids(filterAndSortWantedItems(items, 'missing', 'added'))).toEqual([3, 1]);
+    expect(ids(filterAndSortWantedItems(items, 'obtained', 'added'))).toEqual([2]);
+    expect(filterAndSortWantedItems(items, 'paused', 'added')).toEqual([]);
+  });
+
+  it('sorts by added, title and next search', () => {
+    expect(ids(filterAndSortWantedItems(items, 'all', 'added'))).toEqual([2, 3, 1]);
+    expect(ids(filterAndSortWantedItems(items, 'all', 'title'))).toEqual([2, 1, 3]);
+    expect(ids(filterAndSortWantedItems(items, 'all', 'next_search'))[0]).toBe(3);
+  });
+});
+
+describe('hasClearableObtained', () => {
+  it('counts own obtained books, or every one for admins', () => {
+    const others = [item({ state: 'obtained', subscribed: false })];
+    expect(hasClearableObtained(others, false)).toBe(false);
+    expect(hasClearableObtained(others, true)).toBe(true);
+    expect(hasClearableObtained([item()], true)).toBe(false);
+  });
+});
+
+describe('describeAttemptBlock', () => {
+  it('says whether and how long a release is blocked', () => {
+    expect(describeAttemptBlock(attempt({}))).toBeNull();
+    expect(describeAttemptBlock(attempt({ blocked: true, status: 'rejected' }))).toBe('Blocked');
+    expect(
+      describeAttemptBlock(attempt({ blocked: true, blocked_until: '2026-11-12T00:00:00+00:00' })),
+    ).toMatch(/^Blocked until /);
   });
 });

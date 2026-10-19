@@ -67,6 +67,19 @@ def preferred_formats() -> tuple[tuple[str, ...], frozenset[str]]:
     return order, excluded
 
 
+def format_wait() -> tuple[str | None, float]:
+    """(format a release must reach while waiting, days to wait for it); 0 days is off.
+
+    No format means the first preferred one.
+    """
+    cutoff = str(config.get("WANTED_FORMAT_CUTOFF", "") or "").strip().lower() or None
+    try:
+        days = float(str(config.get("WANTED_FORMAT_WAIT_DAYS", 0) or 0))
+    except ValueError:
+        days = 0.0
+    return cutoff, max(days, 0.0)
+
+
 def supported_formats() -> frozenset[str]:
     """Formats allowed in search results (SUPPORTED_FORMATS)."""
     value = config.get("SUPPORTED_FORMATS", None)

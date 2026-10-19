@@ -689,3 +689,17 @@ class TestAppriseProxyEnv:
         result = notifications_module._apprise_proxy_env()
 
         assert "HTTP_PROXY" not in result
+
+
+def test_render_message_for_found_wanted_book():
+    context = notifications_module.NotificationContext(
+        event=notifications_module.NotificationEvent.WANTED_GRABBED,
+        title="Dune",
+        author="Frank Herbert",
+        detail="Prowlarr",
+    )
+
+    assert notifications_module._render_message(context) == (
+        "Wanted Book Found",
+        'Bookmarked "Dune" by Frank Herbert found on Prowlarr, downloading.',
+    )

@@ -5,15 +5,17 @@ Bookmark an ebook that is not available yet, and Shelfmark downloads it on its o
 ## Using it
 
 - Click the **eye** on a search result, in the book details or in the release dialog to bookmark a book. Click it again to remove your bookmark. Once nobody wants a book any more, a download still running for it is cancelled.
-- The **Wanted** tab in the activity sidebar lists your bookmarks with their state, the last search result and when the next search runs. **Search now** runs a search at the next opportunity.
-- Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases or delete an entry for everyone.
+- The **Wanted** tab in the activity sidebar lists your bookmarks with their state, the last search result and when the next search runs. Filter it by state, sort it, and clear obtained books. **Search now** runs a search at the next opportunity.
+- **History** shows every release tried for a book, why it failed and whether it is blocked.
+- **Languages** sets the languages you want a book in; bookmarking from the release dialog takes its language filter. Changing them searches again right away.
+- Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases (all at once, or one with **Allow again** in the history) or delete an entry for everyone.
 
 The eye only appears for ebooks from a metadata provider, and only for users who may download directly from at least one wanted-list source. Users whose policy requires a request do not see it.
 
 ## How it searches
 
 1. A bookmarked book is searched within a few minutes, then again after growing intervals (**Search Intervals**, default 1, 6 and 24 hours). The last interval repeats for as long as the book stays bookmarked; a bookmark never gives up.
-2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide. Only enabled formats are downloaded; PDF and comic formats are off by default.
+2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide. Only enabled formats are downloaded; PDF and comic formats are off by default. With **Wait for Good Enough Format** set, lower formats are skipped for that many days after bookmarking, in case a release in the **Good Enough Format** (or a better one) turns up.
 3. The best release is downloaded. If it fails, the next one is tried. A release that fails in two separate searches is skipped for 30 days. Cancelling a wanted download rejects that release until an admin clicks **Retry failed releases**.
 4. Changing sources, mirrors, indexers, wanted-list sources or formats, or anyone's request policy or role makes every waiting bookmark search again at once, so a newly added source is tried immediately. A bookmark that no available source may serve for its users rests until one of these changes.
 5. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading for users whose downloads go to a folder. Users receiving books by email or in Grimmory still get it delivered.
@@ -26,4 +28,4 @@ Switching the wanted list off stops new searches. Downloads already running fini
 
 A book is searched and downloaded once, however many users bookmarked it. Users who share a destination (for example one Calibre library) all get that one download. Users with a different destination, email recipient, Grimmory library or a `{User}` naming template get their own copy of the same file, without downloading it again.
 
-Everyone who receives the book gets a **Bookmarked book obtained** notification (selectable per route under Notifications). Failed single attempts do not notify anyone; a failure on Shelfmark's side, such as a destination that is not writable, notifies the admin.
+Everyone who receives the book gets a **Bookmarked book obtained** notification, and a **Bookmarked book found** one when a release starts downloading (both selectable per route under Notifications). Failed single attempts do not notify anyone; a failure on Shelfmark's side, such as a destination that is not writable, notifies the admin.

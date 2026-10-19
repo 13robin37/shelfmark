@@ -34,6 +34,7 @@ const USER_ROUTE_EVENT_OPTIONS = [
   { value: 'download_complete', label: 'Download complete' },
   { value: 'download_failed', label: 'Download failed' },
   { value: 'wanted_obtained', label: 'Bookmarked book obtained' },
+  { value: 'wanted_grabbed', label: 'Bookmarked book found' },
 ];
 const ALLOWED_ROUTE_EVENTS = new Set(USER_ROUTE_EVENT_OPTIONS.map((option) => option.value));
 const ROUTE_EVENT_ORDER = new Map(

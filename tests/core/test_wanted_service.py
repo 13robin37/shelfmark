@@ -332,3 +332,68 @@ def test_blocks_expire_so_an_outage_does_not_block_a_release_forever(service, us
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE wanted_attempts SET finished_at = '2000-01-01T00:00:00+00:00'")
     assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 3)
+
+
+def test_attempts_say_how_long_their_release_is_blocked(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    for cycle in (1, 2):
+        _attempt(service, item["id"], cycle=cycle)
+        service.finish_attempt(item["id"], "md5a", ATTEMPT_ERROR, "boom")
+    _attempt(service, item["id"], cycle=3, source_id="md5b", match_key="other")
+    service.finish_attempt(item["id"], "md5b", "rejected", "Cancelled")
+
+    attempts = {attempt["source_id"]: attempt for attempt in service.list_attempts(item["id"])}
+    assert attempts["md5a"]["blocked"] is True
+    assert attempts["md5a"]["blocked_until"] > attempts["md5a"]["finished_at"]
+    assert attempts["md5b"]["blocked"] is True
+    assert attempts["md5b"]["blocked_until"] is None
+
+
+def test_one_release_can_be_allowed_again(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    for cycle in (1, 2):
+        _attempt(service, item["id"], cycle=cycle)
+        service.finish_attempt(item["id"], "md5a", ATTEMPT_ERROR, "boom")
+    _attempt(service, item["id"], cycle=3, source_id="md5b", match_key="other")
+    service.finish_attempt(item["id"], "md5b", "rejected", "Cancelled")
+    attempt_id = service.list_attempts(item["id"])[-1]["id"]
+
+    assert service.unblock_release(item["id"], attempt_id) == 2
+    excluded = service.excluded_release_keys(item["id"], 9)
+    assert "id:direct_download:md5a" not in excluded
+    assert "id:direct_download:md5b" in excluded
+
+
+def test_changing_languages_searches_again(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    service.update_item(item["id"], next_search_at="2999-01-01T00:00:00+00:00", backoff_level=2)
+
+    assert service.set_languages(item["id"], users[0]["id"], ["en"]) is True
+    assert service.set_languages(item["id"], users[1]["id"], ["en"]) is False
+
+    changed = service.get_item(item["id"])
+    assert changed["backoff_level"] == 0
+    assert changed["next_search_at"] < "2999"
+    assert service.list_subscribers(item["id"])[0]["languages"] == ["en"]
+
+
+def test_clearing_obtained_books(service, users):
+    shared, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    service.add(user_id=users[1]["id"], book_data=_book())
+    own, _ = service.add(
+        user_id=users[0]["id"], book_data=_book(provider_id="2", title="Emma", isbn_13=None)
+    )
+    waiting, _ = service.add(
+        user_id=users[0]["id"], book_data=_book(provider_id="3", title="Ulysses", isbn_13=None)
+    )
+    for item in (shared, own):
+        service.update_item(item["id"], state=STATE_OBTAINED)
+
+    service.clear_obtained(users[0]["id"], everyone=False)
+    assert service.get_item(own["id"]) is None
+    assert [sub["user_id"] for sub in service.list_subscribers(shared["id"])] == [users[1]["id"]]
+    assert service.get_item(waiting["id"]) is not None
+
+    service.clear_obtained(None, everyone=True)
+    assert service.get_item(shared["id"]) is None
+    assert service.get_item(waiting["id"]) is not None

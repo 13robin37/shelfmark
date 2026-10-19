@@ -72,6 +72,7 @@ class NotificationEvent(StrEnum):
     DOWNLOAD_COMPLETE = "download_complete"
     DOWNLOAD_FAILED = "download_failed"
     WANTED_OBTAINED = "wanted_obtained"
+    WANTED_GRABBED = "wanted_grabbed"
 
 
 @dataclass
@@ -329,6 +330,7 @@ def _resolve_notify_type(event: NotificationEvent) -> object:
             NotificationEvent.DOWNLOAD_COMPLETE: "success",
             NotificationEvent.DOWNLOAD_FAILED: "failure",
             NotificationEvent.WANTED_OBTAINED: "success",
+            NotificationEvent.WANTED_GRABBED: "info",
         }
         return fallback[event]
 
@@ -339,6 +341,7 @@ def _resolve_notify_type(event: NotificationEvent) -> object:
         NotificationEvent.DOWNLOAD_COMPLETE: apprise.NotifyType.SUCCESS,
         NotificationEvent.DOWNLOAD_FAILED: apprise.NotifyType.FAILURE,
         NotificationEvent.WANTED_OBTAINED: apprise.NotifyType.SUCCESS,
+        NotificationEvent.WANTED_GRABBED: apprise.NotifyType.INFO,
     }
     return mapping[event]
 
@@ -370,6 +373,12 @@ def _render_message(context: NotificationContext) -> tuple[str, str]:
     if event == NotificationEvent.WANTED_OBTAINED:
         detail = _clean_text(context.detail, "was downloaded")
         return "Wanted Book Available", f'Bookmarked "{title}" by {author} {detail}.'
+    if event == NotificationEvent.WANTED_GRABBED:
+        detail = _clean_text(context.detail, "a source")
+        return (
+            "Wanted Book Found",
+            f'Bookmarked "{title}" by {author} found on {detail}, downloading.',
+        )
 
     error_message = _clean_text(context.error_message, "")
     error_line = f"\nError: {error_message}" if error_message else ""

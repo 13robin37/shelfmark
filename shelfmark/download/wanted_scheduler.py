@@ -29,6 +29,7 @@ from shelfmark.core.utils import ARCHIVE_FORMATS
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
 from shelfmark.core.wanted_config import (
     backoff_hours,
+    format_wait,
     max_searches_per_hour,
     preferred_formats,
     supported_formats,
@@ -103,6 +104,28 @@ class _Cycle:
     started: float
     releases: list[Release] = field(default_factory=list)
     queue_error: str | None = None
+    announced: bool = False
+
+
+@dataclass(frozen=True)
+class _FormatHold:
+    until: datetime
+    message: str
+
+
+def _parse_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    # SQLite's CURRENT_TIMESTAMP is UTC without an offset.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _release_format(release: Release) -> str:
+    return release.format.strip().lower() if isinstance(release.format, str) else ""
 
 
 def _iso_after(hours: float) -> str:
@@ -620,8 +643,11 @@ class WantedScheduler:
         self._service.update_item(
             wanted_id, searched_sources={"answered": answered, "failed": failed}
         )
+        picked, hold = self._hold_for_format(picked, pending, formats)
         if not picked:
             result = f"Searched {len(answered)} source(s), no matching release"
+            if hold is not None:
+                result = hold.message
             if failed:
                 result += f"; {', '.join(failed)} failed"
             # A source failing again is down, not blipping: back off as usual.
@@ -630,12 +656,42 @@ class WantedScheduler:
                 found_nothing=True,
                 source_errors=bool(set(failed) - previously_failed),
                 result=result,
+                search_by=hold.until if hold is not None else None,
             )
             return
         self._cycles[wanted_id] = _Cycle(
             number=cycle_number, started=time.monotonic(), releases=picked
         )
         self._try_next(wanted_id)
+
+    @staticmethod
+    def _hold_for_format(
+        picked: list[Release], pending: list[dict[str, Any]], formats: tuple[str, ...]
+    ) -> tuple[list[Release], _FormatHold | None]:
+        """Drop releases below the good-enough format while subscribers still wait for it."""
+        cutoff, days = format_wait()
+        if days <= 0 or not picked or not formats:
+            return picked, None
+        joined = [_parse_time(sub.get("created_at")) for sub in pending]
+        started = min((time for time in joined if time is not None), default=None)
+        if started is None:
+            return picked, None
+        until = started + timedelta(days=days)
+        if datetime.now(UTC) >= until:
+            return picked, None
+        rank = {fmt: index for index, fmt in enumerate(formats)}
+        limit = rank.get(cutoff, 0) if cutoff else 0
+        good = [
+            release for release in picked if rank.get(_release_format(release), limit + 1) <= limit
+        ]
+        if good:
+            return good, None
+        found = sorted({_release_format(release).upper() or "unknown format" for release in picked})
+        message = (
+            f"Only {', '.join(found)} found; waiting for {formats[limit].upper()} "
+            f"until {until.date().isoformat()}"
+        )
+        return [], _FormatHold(until=until, message=message)
 
     def _in_library(self, book: BookMetadata) -> bool:
         from shelfmark.core import library_index
@@ -758,6 +814,9 @@ class WantedScheduler:
             logger.info(
                 "Wanted: queued %s from %s for %s", release.title, release.source, item["title"]
             )
+            if cycle is not None and not cycle.announced:
+                cycle.announced = True
+                self._notify_grabbed(item, release)
             self._changed(wanted_id)
             return True
         logger.info("Wanted: could not queue %s from %s: %s", release.title, release.source, error)
@@ -775,6 +834,7 @@ class WantedScheduler:
         found_nothing: bool,
         source_errors: bool,
         result: str | None = None,
+        search_by: datetime | None = None,
     ) -> None:
         """Send an item back to waiting with its next search scheduled."""
         self._cycles.pop(item["id"], None)
@@ -785,6 +845,8 @@ class WantedScheduler:
             delay = min(delay, hours[0])
         elif found_nothing:
             level += 1
+        if search_by is not None:
+            delay = max(min(delay, (search_by - datetime.now(UTC)).total_seconds() / 3600), 0)
         updated = self._service.update_item(
             item["id"],
             expected_state=item["state"]
@@ -798,6 +860,32 @@ class WantedScheduler:
         )
         if updated is not None:
             self._changed(item["id"])
+
+    def _notify_grabbed(self, item: dict[str, Any], release: Release) -> None:
+        from shelfmark.core.notifications import (
+            NotificationContext,
+            NotificationEvent,
+            notify_admin,
+            notify_user,
+        )
+        from shelfmark.release_sources import get_source_display_name
+
+        context = NotificationContext(
+            event=NotificationEvent.WANTED_GRABBED,
+            title=item["title"],
+            author=item.get("author") or "Unknown author",
+            content_type=WANTED_CONTENT_TYPE,
+            detail=get_source_display_name(release.source),
+        )
+        user_ids = {
+            _positive_int(sub.get("user_id")) for sub in self._pending_subscribers(item["id"])
+        }
+        try:
+            notify_admin(NotificationEvent.WANTED_GRABBED, context)
+            for user_id in user_ids - {None}:
+                notify_user(user_id, NotificationEvent.WANTED_GRABBED, context)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("Wanted: could not send notifications for %s: %s", item["title"], exc)
 
     def _notify_obtained(
         self, item: dict[str, Any], user_ids: list[int | None], *, reason: str
