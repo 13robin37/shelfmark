@@ -415,3 +415,27 @@ dasselbe Ziel haben.
   Nutzer erledigt ist und für einen anderen nicht (Abschnitt 7).
 - **Wartungsaufwand im Fork**, weil Upstream die Funktion nicht will. Gegenmittel: eigene
   Module, wenige gezielte Eingriffe (Abschnitt 10).
+
+## 14. Readarr-Erweiterungen (Branch `feat/wanted-list-readarr`)
+
+Abgleich mit Readarr (Vormerken und Herunterladen) und die gewählten Erweiterungen:
+
+| # | Funktion | Entscheidung |
+|---|----------|--------------|
+| 1 | Erscheinungsdatum | Datum aus Hardcover, OpenLibrary und Google Books; gesucht wird ab einem Tag vor Erscheinen, die Liste zeigt „Releases …“. |
+| 2 | Verlauf und Sperrliste | Aufklappbarer Verlauf pro Eintrag; Admins geben einzelne Releases wieder frei. |
+| 3 | Manuelle Auswahl | „Für Merkliste laden“ im Release-Dialog zählt für den Eintrag und alle Vormerker; pro Release ein Hinweis, warum die Automatik ihn übergehen würde. |
+| 4 | Wunschformat abwarten | Einstellbar: Format, ab dem ein Release reicht, und Tage, die darauf gewartet wird. Standard 0 Tage (aus). |
+| 5 | Sprache pro Vormerkung | Vormerken aus dem Release-Dialog übernimmt dessen Sprachfilter; im Wanted-Tab änderbar, eine Änderung sucht sofort neu. |
+| 6 | RSS-Abgleich | Neueste Releases von Prowlarr/Newznab regelmäßig gegen alle Vormerkungen; Intervall einstellbar, Standard 15 Minuten, 0 schaltet ab. |
+| 7 | Serien und Autoren | „Alle fehlenden Bände vormerken“ und dauerhaftes Beobachten von Serien und Autoren. |
+| 8 | Hardcover-Listen | Eine Hardcover-Liste pro Shelfmark-Nutzer füllt die Merkliste (alle 6 Stunden); Entfernen in Hardcover entfernt nichts. |
+| 9 | Wanted-Tab | Status-Filter, Sortierung, „Erhaltene entfernen“. Keine Mehrfachauswahl, kein „Alle suchen“. |
+| 10 | Benachrichtigungen | Neu: „Release gefunden, wird geladen“, einmal pro Suchdurchgang. |
+| + | Anfragen | Beim Genehmigen einer Anfrage kann der Admin sie auf die Merkliste setzen; die Vormerkung gilt für den anfragenden Nutzer. |
+
+Bewusst nicht übernommen: Qualitäts-Upgrades bereits zugestellter Bücher, Wortlisten und Scoring,
+Kalenderseite, Umbenennen/Import (übernehmen Shelfmarks Ausgabemodi), Hörbücher.
+
+Umsetzung in vier Phasen mit Gegenprobe nach jeder Phase: (a) 2, 4, 5, 9, 10; (b) 1, 3; (c) 6;
+(d) 7, 8 und Anfragen.
