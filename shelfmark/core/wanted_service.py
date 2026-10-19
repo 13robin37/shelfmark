@@ -288,7 +288,8 @@ class WantedService:
                         # Someone new wants it, so it is wanted again until they have it.
                         conn.execute(
                             "UPDATE wanted_items SET state = ?, next_search_at = ?, "
-                            "backoff_level = 0, updated_at = ? WHERE id = ?",
+                            "backoff_level = 0, last_result = NULL, obtained_at = NULL, "
+                            "obtained_reason = NULL, updated_at = ? WHERE id = ?",
                             (STATE_WAITING, now, now, wanted_id),
                         )
                 elif normalized_languages is not None:
@@ -342,17 +343,6 @@ class WantedService:
         conn = self._connect()
         try:
             return self._get_item(conn, wanted_id)
-        finally:
-            conn.close()
-
-    def find_by_task(self, task_id: str) -> dict[str, Any] | None:
-        """Return the item whose current download is ``task_id``."""
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT * FROM wanted_items WHERE current_task_id = ? LIMIT 1", (task_id,)
-            ).fetchone()
-            return self._row_to_item(row)
         finally:
             conn.close()
 

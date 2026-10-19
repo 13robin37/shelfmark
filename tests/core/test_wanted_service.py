@@ -91,13 +91,24 @@ def test_removing_the_last_subscriber_deletes_the_item(service, users):
 
 def test_a_new_subscriber_reopens_an_obtained_item(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    service.update_item(item["id"], state=STATE_OBTAINED, next_search_at=None, backoff_level=2)
+    service.update_item(
+        item["id"],
+        state=STATE_OBTAINED,
+        next_search_at=None,
+        backoff_level=2,
+        last_result="Obtained",
+        obtained_at="2026-10-01T00:00:00+00:00",
+        obtained_reason="downloaded",
+    )
 
     reopened, _ = service.add(user_id=users[1]["id"], book_data=_book())
 
     assert reopened["state"] == STATE_WAITING
     assert reopened["backoff_level"] == 0
     assert reopened["next_search_at"] is not None
+    assert reopened["last_result"] is None
+    assert reopened["obtained_at"] is None
+    assert reopened["obtained_reason"] is None
 
 
 def test_no_auth_mode_subscriber_without_user_id(service):
@@ -256,11 +267,9 @@ def test_reset_interrupted_returns_items_to_waiting(service, users):
     assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 2)
 
 
-def test_mark_delivered_and_find_by_task(service, users):
+def test_mark_delivered(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    service.update_item(item["id"], current_task_id="md5a")
 
-    assert service.find_by_task("md5a")["id"] == item["id"]
     service.mark_delivered(item["id"], [users[0]["id"]], "md5a")
     assert service.list_subscribers(item["id"])[0]["delivered_at"] is not None
 

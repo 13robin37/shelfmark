@@ -312,6 +312,7 @@ def test_a_release_that_cannot_be_queued_is_skipped_without_a_strike(env):
     assert len(env.queued) == 3
     assert {attempt["status"] for attempt in env.service.list_attempts(wanted_id)} == {"cancelled"}
     assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert env.item(wanted_id)["last_result"].endswith("could not queue: Source unavailable")
 
 
 def test_an_old_candidate_list_is_searched_afresh(env):
@@ -430,6 +431,7 @@ def test_another_target_gets_its_own_delivery_task_from_a_copy(env, two_targets,
     subscribers = env.service.list_subscribers(wanted_id)
     assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", delivery["source_id"]]
     assert env.item(wanted_id)["state"] == STATE_OBTAINED
+    assert not any((tmp_path / "held").iterdir())
 
 
 def test_copies_are_dropped_when_the_download_fails(env, two_targets, tmp_path):
@@ -721,6 +723,24 @@ def test_no_copy_when_the_owner_no_longer_waits(env, two_targets, tmp_path):
     # Bob's target is "extra" now: he gets his own delivery task from a copy.
     assert env.queued[-1][1] == env.bob["id"]
     assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
+
+
+def test_the_owner_leaving_a_shared_target_needs_no_copy(env, tmp_path):
+    with (
+        patch.object(ws, "delivery_target", return_value="folder:/books"),
+        patch.object(ws, "_held_copies_dir", return_value=tmp_path / "held"),
+    ):
+        wanted_id = env.add()
+        env.add(user=env.bob)
+        env.scheduler.tick()
+        env.service.remove_subscriber(wanted_id, env.alice["id"])
+        task = _downloaded(env, wanted_id, tmp_path)
+        env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+
+    # The download lands in the folder Bob shares, so it delivers to him.
+    assert len(env.queued) == 1
+    assert env.service.list_subscribers(wanted_id)[0]["delivery_task_id"] == "aa-1"
+    assert env.item(wanted_id)["state"] == STATE_OBTAINED
 
 
 def test_a_user_template_makes_every_user_a_target(env):

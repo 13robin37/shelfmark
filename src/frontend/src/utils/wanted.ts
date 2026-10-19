@@ -42,15 +42,22 @@ export const buildWantedBookPayload = (book: Book): WantedBookPayload | null => 
   };
 };
 
+export interface OwnWantedItems {
+  byKey: ReadonlyMap<string, WantedItem>;
+  byId: ReadonlyMap<number, WantedItem>;
+}
+
 /**
  * The viewer's bookmark state for a book: local toggles first, then the viewer's own
- * wanted items. What the search results reported only counts until the list has loaded;
- * after that it may be stale (removed in another tab, or by an admin).
+ * wanted items - found by the book's key or, for a book that joined an item of another
+ * provider (by ISBN), by the item id the server reported for it. What the search results
+ * reported only counts as such until the list has loaded; after that it may be stale.
  */
 export const resolveWantedState = (
   book: Book,
   overrides: ReadonlyMap<string, WantedBookState | null>,
-  ownItems: ReadonlyMap<string, WantedItem>,
+  ownItems: OwnWantedItems,
+  linkedIds: ReadonlyMap<string, number>,
   listLoaded: boolean,
 ): WantedBookState | undefined => {
   if (!book.provider || !book.provider_id) {
@@ -60,7 +67,10 @@ export const resolveWantedState = (
   if (overrides.has(key)) {
     return overrides.get(key) ?? undefined;
   }
-  const item = ownItems.get(key);
+  const reportedId = book.wanted?.subscribed ? book.wanted.id : undefined;
+  const linkedId = linkedIds.get(key) ?? reportedId;
+  const item =
+    ownItems.byKey.get(key) ?? (linkedId === undefined ? undefined : ownItems.byId.get(linkedId));
   if (item) {
     return { id: item.id, state: item.state, subscribed: true };
   }
@@ -126,10 +136,11 @@ export const describeWantedItem = (item: WantedItem, now: number = Date.now()): 
   return parts.length > 0 ? parts.join(' · ') : 'Waiting for the first search';
 };
 
-/** Own items by book key, for marking search results. */
-export const indexOwnWantedItems = (items: WantedItem[]): Map<string, WantedItem> =>
-  new Map(
-    items
-      .filter((item) => item.subscribed)
-      .map((item) => [wantedKey(item.provider, item.provider_id), item]),
-  );
+/** Own items by book key and by id, for marking search results. */
+export const indexOwnWantedItems = (items: WantedItem[]): OwnWantedItems => {
+  const own = items.filter((item) => item.subscribed);
+  return {
+    byKey: new Map(own.map((item) => [wantedKey(item.provider, item.provider_id), item])),
+    byId: new Map(own.map((item) => [item.id, item])),
+  };
+};

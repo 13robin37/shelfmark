@@ -46,6 +46,7 @@ from shelfmark.core.wanted_service import (
     STATE_WAITING,
     WantedService,
 )
+from shelfmark.download.fs import run_blocking_io
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,6 +101,7 @@ class _Cycle:
     number: int
     started: float
     releases: list[Release] = field(default_factory=list)
+    queue_error: str | None = None
 
 
 def _iso_after(hours: float) -> str:
@@ -139,20 +141,20 @@ def delivery_target(user_id: int | None, username: str | None) -> str:
 
 
 def _copy_path(source: Path, target_dir: Path) -> Path:
-    target_dir.mkdir(parents=True, exist_ok=True)
+    run_blocking_io(target_dir.mkdir, parents=True, exist_ok=True)
     target = target_dir / source.name
-    if source.is_dir():
-        shutil.copytree(source, target)
+    if run_blocking_io(source.is_dir):
+        run_blocking_io(shutil.copytree, source, target)
     else:
-        shutil.copy2(source, target)
+        run_blocking_io(shutil.copy2, source, target)
     return target
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path, ignore_errors=True)
+    if run_blocking_io(path.is_dir):
+        run_blocking_io(shutil.rmtree, path, ignore_errors=True)
     else:
-        path.unlink(missing_ok=True)
+        run_blocking_io(path.unlink, missing_ok=True)
 
 
 def release_to_queue_payload(release: Release, book: dict[str, Any]) -> dict[str, Any]:
@@ -226,7 +228,7 @@ class WantedScheduler:
         if self._thread is not None and self._thread.is_alive():
             return
         # Copies held for deliveries do not survive a restart; neither does their task.
-        shutil.rmtree(_held_copies_dir(), ignore_errors=True)
+        _remove_path(_held_copies_dir())
         self._thread = threading.Thread(target=self._run, daemon=True, name="WantedScheduler")
         self._thread.start()
 
@@ -310,11 +312,11 @@ class WantedScheduler:
             return
         # Download endings arrive on other threads; reconcile must not interleave with one.
         with self._terminal_lock:
-            self._reconcile_downloads_locked()
+            self._reconcile_downloads_locked(self._task_lookup)
 
-    def _reconcile_downloads_locked(self) -> None:
-        if self._task_lookup is None:
-            return
+    def _reconcile_downloads_locked(
+        self, task_lookup: Callable[[str], tuple[QueueStatus | None, Any]]
+    ) -> None:
         for item in self._service.items_in_state(STATE_DOWNLOADING):
             task_id = item.get("current_task_id")
             if not task_id:
@@ -322,7 +324,7 @@ class WantedScheduler:
                 if not self._deliveries_in_flight(item["id"]):
                     self._settle_deliveries(item)
                 continue
-            status, task = self._task_lookup(task_id)
+            status, task = task_lookup(task_id)
             if status is None or getattr(task, "wanted_id", None) != item["id"]:
                 logger.warning("Wanted: task %s of %s vanished; moving on", task_id, item["title"])
                 self._service.finish_attempt(item["id"], task_id, ATTEMPT_CANCELLED, "Task lost")
@@ -614,9 +616,10 @@ class WantedScheduler:
             if self._queue_attempt(item, release, owner, cycle.number):
                 return
         self._cycles.pop(wanted_id, None)
-        self._end_cycle(
-            item, found_nothing=True, source_errors=False, result="Every matching release failed"
-        )
+        result = "Every matching release failed"
+        if cycle.queue_error:
+            result = f"{result}; could not queue: {cycle.queue_error}"
+        self._end_cycle(item, found_nothing=True, source_errors=False, result=result)
 
     def _queue_attempt(
         self, item: dict[str, Any], release: Release, owner: dict[str, Any], cycle_number: int
@@ -662,6 +665,9 @@ class WantedScheduler:
                 and status not in TERMINAL_QUEUE_STATUSES
                 and getattr(queued_task, "wanted_id", None) == wanted_id
             )
+        cycle = self._cycles.get(wanted_id)
+        if cycle is not None:
+            cycle.queue_error = None if success else error
         if success:
             logger.info(
                 "Wanted: queued %s from %s for %s", release.title, release.source, item["title"]
@@ -855,8 +861,8 @@ class WantedScheduler:
     ) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
         """Pending subscribers allowed this download, grouped by delivery target.
 
-        Returns the group the download itself delivers to (the one holding the user it
-        runs for; empty if that user is no longer waiting) and every other group.
+        Returns the group the download itself delivers to (those sharing the target of
+        the user it runs for, who may have left since) and every other group.
         """
         source = str(getattr(task, "source", "") or "")
         receivers = self._users_allowed(self._pending_subscribers(wanted_id), source)
@@ -864,15 +870,11 @@ class WantedScheduler:
         for sub in receivers:
             target = delivery_target(_positive_int(sub.get("user_id")), sub.get("username"))
             groups.setdefault(target, []).append(sub)
-        owner_id = getattr(task, "user_id", None)
-        owner_group: list[dict[str, Any]] = []
-        others: list[list[dict[str, Any]]] = []
-        for group in groups.values():
-            if not owner_group and any(sub.get("user_id") == owner_id for sub in group):
-                owner_group = group
-            else:
-                others.append(group)
-        return owner_group, others
+        owner_target = delivery_target(
+            _positive_int(getattr(task, "user_id", None)), getattr(task, "username", None)
+        )
+        owner_group = groups.pop(owner_target, [])
+        return owner_group, list(groups.values())
 
     def on_downloaded_file(self, task: Any, path: Path) -> None:
         """Hold a copy of a wanted download for every other delivery target."""
@@ -978,14 +980,13 @@ class WantedScheduler:
         task: Any,
     ) -> None:
         wanted_id, user_ids, copy = extra
+        # Delivered, or the subscribers stay waiting for a download of their own.
+        _remove_path(copy.parent)
         item = self._service.get_item(wanted_id)
         if status == QueueStatus.COMPLETE and item is not None:
             self._service.mark_delivered(wanted_id, user_ids, task_id)
             self._notify_obtained(item, user_ids, reason="downloaded")
         else:
-            # The subscribers stay waiting and the next search finds them a download of
-            # their own, so the copy is of no further use.
-            _remove_path(copy.parent)
             message = getattr(task, "status_message", None)
             stalled = isinstance(message, str) and message.startswith(_STALLED_MESSAGE_PREFIX)
             if status == QueueStatus.CANCELLED and not stalled and item is not None:

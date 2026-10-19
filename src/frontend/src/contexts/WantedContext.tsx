@@ -89,6 +89,8 @@ export function WantedProvider({
   const [loading, setLoading] = useState(false);
   const latestRequest = useRef(0);
   const [overrides, setOverrides] = useState<Map<string, WantedBookState | null>>(() => new Map());
+  // Book key -> the item it joined, which may be keyed by another provider's book.
+  const [linkedIds, setLinkedIds] = useState<Map<string, number>>(() => new Map());
 
   const refresh = useCallback(async () => {
     if (!active) {
@@ -139,8 +141,8 @@ export function WantedProvider({
   const ownItems = useMemo(() => indexOwnWantedItems(items), [items]);
 
   const stateFor = useCallback(
-    (book: Book) => resolveWantedState(book, overrides, ownItems, listLoaded),
-    [overrides, ownItems, listLoaded],
+    (book: Book) => resolveWantedState(book, overrides, ownItems, linkedIds, listLoaded),
+    [overrides, ownItems, linkedIds, listLoaded],
   );
 
   const canBookmarkBook = useCallback(
@@ -183,8 +185,13 @@ export function WantedProvider({
       }
       await run(async () => {
         const { item } = await addWanted(payload);
+        setLinkedIds((prev) => new Map(prev).set(key, item.id));
         setOverrides((prev) =>
-          new Map(prev).set(key, { id: item.id, state: item.state, subscribed: true }),
+          new Map(prev).set(key, {
+            id: item.id,
+            state: item.state,
+            subscribed: true,
+          }),
         );
       }, `"${book.title}" is on your wanted list and will download when available`);
     },

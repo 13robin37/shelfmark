@@ -12,7 +12,7 @@ The eye only appears for ebooks from a metadata provider, and only for users who
 
 ## How it searches
 
-1. A bookmarked book is searched right away, then again after growing intervals (**Search Intervals**, default 1, 6 and 24 hours). The last interval repeats for as long as the book stays bookmarked; a bookmark never gives up.
+1. A bookmarked book is searched within a few minutes, then again after growing intervals (**Search Intervals**, default 1, 6 and 24 hours). The last interval repeats for as long as the book stays bookmarked; a bookmark never gives up.
 2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide.
 3. The best release is downloaded. If it fails, the next one is tried. A release that fails in two separate searches is skipped for 30 days. Cancelling a wanted download rejects that release for good.
 4. Changing sources, mirrors, indexers or request policies makes every waiting bookmark search again at once, so a newly added source is tried immediately.
