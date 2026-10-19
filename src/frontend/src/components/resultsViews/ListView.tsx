@@ -8,6 +8,7 @@ import { getFormatColor, getLanguageColor } from '../../utils/colorMaps';
 import { BookActionButton } from '../BookActionButton';
 import { BookTargetDropdown } from '../BookTargetDropdown';
 import { DisplayFieldIcon, DisplayFieldBadge, LibraryBadge } from '../shared';
+import { WantedToggleButton } from '../WantedToggleButton';
 
 interface ListViewProps {
   books: Book[];
@@ -301,6 +302,7 @@ export const ListView = ({
 
                 {/* Action Buttons */}
                 <div className="flex flex-row justify-end gap-0.5 sm:gap-1 sm:pr-3">
+                  <WantedToggleButton book={book} />
                   {bookSupportsTargets(book) && targetProvider && targetBookId && (
                     <BookTargetDropdown
                       provider={targetProvider}

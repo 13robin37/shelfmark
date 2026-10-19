@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, type KeyboardEventHandler } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useWanted } from '../contexts/WantedContext';
 import { useDescriptionOverflow } from '../hooks/releaseModal/useDescriptionOverflow';
 import { useHeaderThumbOnScroll } from '../hooks/releaseModal/useHeaderThumbOnScroll';
 import { useReleaseSearchSession } from '../hooks/releaseModal/useReleaseSearchSession';
@@ -58,6 +59,7 @@ import { DropdownList } from './DropdownList';
 import { LanguageMultiSelect } from './LanguageMultiSelect';
 import { PackReviewPanel } from './PackReviewPanel';
 import { ReleaseCell } from './ReleaseCell';
+import { WantedToggleButton } from './WantedToggleButton';
 
 // Combined mode configuration for the ReleaseModal
 interface CombinedModeConfig {
@@ -777,6 +779,7 @@ const ReleaseModalSession = ({
     contentType === 'audiobook' && supportedAudiobookFormats.length > 0
       ? supportedAudiobookFormats
       : supportedFormats;
+  const { canBookmarkBook } = useWanted();
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   // Multi-book packs: `multiBook` is the manual header toggle (heuristic split for
@@ -1719,8 +1722,9 @@ const ReleaseModalSession = ({
                         </svg>
                       </a>
                     )}
-                    {(onRequestBook || bookSupportsTargets(book)) && (
+                    {(onRequestBook || bookSupportsTargets(book) || canBookmarkBook(book)) && (
                       <span className="inline-flex items-center gap-3">
+                        <WantedToggleButton book={book} variant="pill" />
                         {onRequestBook && (
                           <button
                             type="button"

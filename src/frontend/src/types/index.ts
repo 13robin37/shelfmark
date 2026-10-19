@@ -33,6 +33,7 @@ export interface Book {
   added_time?: number; // Timestamp when added to queue
   content_type?: string; // "ebook", "audiobook", or related book subtype
   library?: LibraryOwnership; // "already in your library" flags from the library check
+  wanted?: WantedBookState; // Set when the book is on the viewer's wanted list
   source?: string; // Release source handler (e.g., "direct_download", "prowlarr")
   source_display_name?: string; // Human-readable source name (e.g., "Direct Download")
   // Metadata provider fields (used in universal search mode)
@@ -540,4 +541,47 @@ export interface SearchStatusData {
   book_id: string; // Book ID (may be empty)
   message: string; // Human-readable status message
   phase: 'connecting' | 'searching' | 'downloading' | 'parsing' | 'complete' | 'error';
+}
+
+// Wanted list (bookmarked books that download automatically)
+export type WantedState = 'waiting' | 'searching' | 'downloading' | 'obtained' | 'paused';
+
+export interface WantedBookState {
+  id: number;
+  state: WantedState;
+  subscribed: boolean;
+}
+
+interface WantedSubscriber {
+  user_id: number | null;
+  username: string | null;
+  delivered_at: string | null;
+}
+
+export interface WantedItem {
+  id: number;
+  title: string;
+  author: string | null;
+  preview: string | null;
+  year: string | null;
+  provider: string;
+  provider_id: string;
+  state: WantedState;
+  search_count: number;
+  last_search_at: string | null;
+  next_search_at: string | null;
+  last_result: string | null;
+  obtained_at: string | null;
+  obtained_reason: 'downloaded' | 'in_library' | null;
+  attempt_count: number;
+  created_at: string | null;
+  subscriber_count: number;
+  subscribed: boolean;
+  current_task_id?: string | null;
+  subscribers?: WantedSubscriber[];
+}
+
+export interface WantedStatus {
+  enabled: boolean;
+  can_bookmark: boolean;
 }

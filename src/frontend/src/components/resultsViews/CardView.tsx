@@ -7,6 +7,7 @@ import { bookSupportsTargets } from '../../utils/bookTargetLoader';
 import { BookActionButton } from '../BookActionButton';
 import { BookTargetDropdown } from '../BookTargetDropdown';
 import { DisplayFieldBadges, LibraryBadge } from '../shared';
+import { WantedToggleButton } from '../WantedToggleButton';
 
 const SkeletonLoader = () => (
   <div className="h-full w-full animate-pulse bg-linear-to-r from-gray-300 via-gray-200 to-gray-300 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700" />
@@ -144,6 +145,10 @@ export const CardView = ({
             pointerEvents: isHovered || dropdownOpen || isLoadingDetails ? 'auto' : 'none',
           }}
         >
+          <WantedToggleButton
+            book={book}
+            className="h-8 w-8 bg-white/95 text-gray-600 shadow-lg hover:scale-110 dark:bg-neutral-800/95 dark:text-gray-200"
+          />
           {bookSupportsTargets(book) && targetProvider && targetBookId && (
             <BookTargetDropdown
               provider={targetProvider}

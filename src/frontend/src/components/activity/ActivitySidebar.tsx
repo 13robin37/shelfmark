@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type WheelEvent } from 'react';
 
+import { useWanted } from '../../contexts/WantedContext';
 import { useTabIndicator } from '../../hooks/ui/useTabIndicator';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
@@ -9,6 +10,7 @@ import { ActivityCard } from './ActivityCard';
 import type { DownloadStatusKey } from './activityMappers';
 import { downloadToActivityItem, linkedDownloadIdForRequest } from './activityMappers';
 import type { ActivityItem } from './activityTypes';
+import { WantedList } from './WantedList';
 
 interface ActivitySidebarProps {
   isOpen: boolean;
@@ -65,7 +67,7 @@ const DOWNLOAD_STATUS_KEYS: DownloadStatusKey[] = [
 
 type ActivityCategoryKey = 'needs_review' | 'in_progress' | 'complete' | 'failed';
 
-type ActivityTabKey = 'all' | 'downloads' | 'requests' | 'history';
+type ActivityTabKey = 'all' | 'downloads' | 'requests' | 'wanted' | 'history';
 const ALL_USERS_FILTER = '__all_users__';
 
 const getCategoryLabel = (key: ActivityCategoryKey, isAdmin: boolean): string => {
@@ -88,7 +90,7 @@ const getVisibleCategoryOrder = (tab: ActivityTabKey): ActivityCategoryKey[] => 
   if (tab === 'requests') {
     return ['needs_review', 'in_progress', 'complete', 'failed'];
   }
-  if (tab === 'history') {
+  if (tab === 'history' || tab === 'wanted') {
     return [];
   }
   return ['needs_review', 'in_progress', 'complete', 'failed'];
@@ -259,7 +261,10 @@ export const ActivitySidebar = ({
   );
 
   const isPinnedOpen = isOpen && isDesktop && isPinned;
-  const effectiveActiveTab = !showRequestsTab && activeTab === 'requests' ? 'all' : activeTab;
+  const { enabled: wantedEnabled, items: wantedItems } = useWanted();
+  const tabHidden =
+    (!showRequestsTab && activeTab === 'requests') || (!wantedEnabled && activeTab === 'wanted');
+  const effectiveActiveTab = tabHidden ? 'all' : activeTab;
   if (effectiveActiveTab !== activeTab) {
     setActiveTab(effectiveActiveTab);
   }
@@ -562,7 +567,11 @@ export const ActivitySidebar = ({
 
   // Tab indicator (sliding underline, same pattern as ReleaseModal)
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const tabIndicatorStyle = useTabIndicator(tabRefs, effectiveActiveTab, showRequestsTab);
+  const tabIndicatorStyle = useTabIndicator(
+    tabRefs,
+    effectiveActiveTab,
+    `${showRequestsTab}:${wantedEnabled}`,
+  );
 
   const panel = (
     <>
@@ -807,6 +816,28 @@ export const ActivitySidebar = ({
                   )}
                 </button>
               )}
+              {wantedEnabled && (
+                <button
+                  type="button"
+                  ref={(el) => {
+                    tabRefs.current.wanted = el;
+                  }}
+                  onClick={() => handleTabChange('wanted')}
+                  className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+                    effectiveActiveTab === 'wanted'
+                      ? 'text-sky-600 dark:text-sky-400'
+                      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+                  }`}
+                  aria-current={effectiveActiveTab === 'wanted' ? 'page' : undefined}
+                >
+                  Wanted
+                  {wantedItems.some((item) => item.state !== 'obtained') && (
+                    <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-sky-500/15 px-1 text-[11px] leading-none text-sky-700 dark:text-sky-300">
+                      {wantedItems.filter((item) => item.state !== 'obtained').length}
+                    </span>
+                  )}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -818,6 +849,9 @@ export const ActivitySidebar = ({
         style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
       >
         {(() => {
+          if (effectiveActiveTab === 'wanted') {
+            return <WantedList />;
+          }
           if (visibleItems.length === 0) {
             return <p className="mt-8 text-center text-sm opacity-70">{emptyStateMessage}</p>;
           }

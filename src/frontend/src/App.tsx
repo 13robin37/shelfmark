@@ -20,6 +20,7 @@ import { ToastContainer } from './components/ToastContainer';
 import { UrlSearchBootstrapMount } from './components/UrlSearchBootstrapMount';
 import { SearchModeProvider } from './contexts/SearchModeContext';
 import { useSocket } from './contexts/SocketContext';
+import { WantedProvider } from './contexts/WantedContext';
 import { DEFAULT_LANGUAGES, DEFAULT_SUPPORTED_FORMATS } from './data/languages';
 import { useBookTargetDeselectSync } from './hooks/app/useBookTargetDeselectSync';
 import { useContentTypePreferences } from './hooks/app/useContentTypePreferences';
@@ -2427,381 +2428,392 @@ function App() {
 
   const mainAppContent = (
     <SearchModeProvider searchMode={effectiveSearchMode}>
-      <div ref={headerRef} className="fixed top-0 right-0 left-0 z-40">
-        <Header
-          calibreWebUrl={config?.calibre_web_url || ''}
-          audiobookLibraryUrl={config?.audiobook_library_url || ''}
-          debug={config?.debug || false}
-          logoUrl={logoUrl}
-          showSearch={!isInitialState}
-          searchInput={activeQueryValue}
-          searchInputLabel={activeQueryValueLabel}
-          onSearchChange={handleActiveQueryValueChange}
-          onDownloadsClick={toggleDownloadsSidebar}
-          onSettingsClick={handleSettingsClick}
-          isAdmin={requestRoleIsAdmin}
-          canAccessSettings={isAuthenticated}
-          username={username}
-          displayName={displayName}
-          actingAsUser={effectiveActingAsUser}
-          onActingAsUserChange={setActingAsUser}
-          adminUsers={availableActingAsUsers}
-          isAdminUsersLoading={isAdminUsersLoading}
-          adminUsersError={adminUsersError}
-          hasLoadedAdminUsers={hasLoadedAdminUsers}
-          onLoadAdminUsers={loadAdminUsers}
-          statusCounts={statusCounts}
-          onLogoClick={() => {
-            handleResetSearch(config);
-            setActiveQueryTarget('general');
-            setActiveResultsSort('');
-          }}
-          authRequired={authRequired}
-          isAuthenticated={isAuthenticated}
-          onLogout={() => {
-            void handleLogoutWithCleanup();
-          }}
-          onSearch={handleSearchDispatch}
-          onAdvancedToggle={
-            hasAdvancedContent ? () => setShowAdvanced(!effectiveShowAdvanced) : undefined
-          }
-          isAdvancedActive={effectiveShowAdvanced}
-          isLoading={isSearching}
-          onShowToast={showToast}
-          onRemoveToast={removeToast}
-          contentType={effectiveContentType}
-          onContentTypeChange={setContentType}
-          allowedContentTypes={allowedContentTypes}
-          combinedMode={effectiveCombinedMode}
-          combinedModeLocked={combinedModeLocked}
-          onCombinedModeChange={combinedModeAllowed ? setCombinedMode : undefined}
-          queryTargets={queryTargets}
-          activeQueryTarget={effectiveActiveQueryTarget}
-          onQueryTargetChange={handleQueryTargetChange}
-          activeQueryField={activeQueryField}
-        />
-      </div>
-
-      <div
-        className={`flex flex-col${
-          usePinnedMainScrollContainer ? ' min-h-0 overflow-y-auto overscroll-y-contain' : ' flex-1'
-        }`}
-        style={
-          usePinnedMainScrollContainer
-            ? {
-                position: 'fixed',
-                top: `${headerHeight}px`,
-                bottom: 0,
-                left: 0,
-                right: '25rem',
-                zIndex: 20,
-              }
-            : { paddingTop: `${headerHeight}px` }
-        }
+      <WantedProvider
+        active={isAuthenticated || !authRequired}
+        isAdmin={requestRoleIsAdmin || !authRequired}
+        contentType={effectiveContentType}
+        onShowToast={showToast}
       >
-        <AdvancedFilters
-          visible={effectiveShowAdvanced && !isInitialState}
-          bookLanguages={bookLanguages}
-          defaultLanguage={defaultLanguageCodes}
-          filters={advancedFilters}
-          onFiltersChange={updateAdvancedFilters}
-          searchMode={effectiveSearchMode}
-          onSearchModeChange={handleSearchModeChange}
-          metadataProviders={metadataProviders}
-          activeMetadataProvider={effectiveMetadataProvider}
-          onMetadataProviderChange={handleMetadataProviderChange}
-          contentType={effectiveContentType}
-          combinedMode={effectiveCombinedMode}
-          isAdmin={requestRoleIsAdmin}
-          onClose={() => setShowAdvanced(false)}
-        />
-
-        {!isInitialState && effectiveActiveQueryTarget === 'manual' && (
-          <p className="px-4 pt-2 text-xs opacity-50 sm:px-6 lg:ml-16 lg:px-8">
-            Manual search queries release sources directly. Some sources may return limited
-            metadata, which can affect file naming templates.
-          </p>
-        )}
-
-        <main
-          className="relative mx-auto w-full max-w-7xl px-4 py-3 sm:px-6 sm:py-6 lg:px-8"
-          style={
-            usePinnedMainScrollContainer
-              ? { display: 'block', flex: '0 0 auto', minHeight: 0 }
-              : undefined
-          }
-        >
-          <SearchSection
-            onSearch={handleSearchDispatch}
-            isLoading={isSearching}
-            isInitialState={isInitialState}
-            searchPageTitle={config?.search_page_title || 'Shelfmark'}
-            bookLanguages={bookLanguages}
-            defaultLanguage={defaultLanguageCodes}
+        <div ref={headerRef} className="fixed top-0 right-0 left-0 z-40">
+          <Header
+            calibreWebUrl={config?.calibre_web_url || ''}
+            audiobookLibraryUrl={config?.audiobook_library_url || ''}
+            debug={config?.debug || false}
             logoUrl={logoUrl}
-            queryValue={activeQueryValue}
-            queryValueLabel={activeQueryValueLabel}
-            onQueryValueChange={handleActiveQueryValueChange}
-            queryTargets={queryTargets}
-            activeQueryTarget={effectiveActiveQueryTarget}
-            onQueryTargetChange={handleQueryTargetChange}
-            showAdvanced={effectiveShowAdvanced}
+            showSearch={!isInitialState}
+            searchInput={activeQueryValue}
+            searchInputLabel={activeQueryValueLabel}
+            onSearchChange={handleActiveQueryValueChange}
+            onDownloadsClick={toggleDownloadsSidebar}
+            onSettingsClick={handleSettingsClick}
+            isAdmin={requestRoleIsAdmin}
+            canAccessSettings={isAuthenticated}
+            username={username}
+            displayName={displayName}
+            actingAsUser={effectiveActingAsUser}
+            onActingAsUserChange={setActingAsUser}
+            adminUsers={availableActingAsUsers}
+            isAdminUsersLoading={isAdminUsersLoading}
+            adminUsersError={adminUsersError}
+            hasLoadedAdminUsers={hasLoadedAdminUsers}
+            onLoadAdminUsers={loadAdminUsers}
+            statusCounts={statusCounts}
+            onLogoClick={() => {
+              handleResetSearch(config);
+              setActiveQueryTarget('general');
+              setActiveResultsSort('');
+            }}
+            authRequired={authRequired}
+            isAuthenticated={isAuthenticated}
+            onLogout={() => {
+              void handleLogoutWithCleanup();
+            }}
+            onSearch={handleSearchDispatch}
             onAdvancedToggle={
               hasAdvancedContent ? () => setShowAdvanced(!effectiveShowAdvanced) : undefined
             }
-            advancedFilters={advancedFilters}
-            onAdvancedFiltersChange={updateAdvancedFilters}
+            isAdvancedActive={effectiveShowAdvanced}
+            isLoading={isSearching}
+            onShowToast={showToast}
+            onRemoveToast={removeToast}
             contentType={effectiveContentType}
             onContentTypeChange={setContentType}
             allowedContentTypes={allowedContentTypes}
             combinedMode={effectiveCombinedMode}
             combinedModeLocked={combinedModeLocked}
             onCombinedModeChange={combinedModeAllowed ? setCombinedMode : undefined}
+            queryTargets={queryTargets}
+            activeQueryTarget={effectiveActiveQueryTarget}
+            onQueryTargetChange={handleQueryTargetChange}
             activeQueryField={activeQueryField}
+          />
+        </div>
+
+        <div
+          className={`flex flex-col${
+            usePinnedMainScrollContainer
+              ? ' min-h-0 overflow-y-auto overscroll-y-contain'
+              : ' flex-1'
+          }`}
+          style={
+            usePinnedMainScrollContainer
+              ? {
+                  position: 'fixed',
+                  top: `${headerHeight}px`,
+                  bottom: 0,
+                  left: 0,
+                  right: '25rem',
+                  zIndex: 20,
+                }
+              : { paddingTop: `${headerHeight}px` }
+          }
+        >
+          <AdvancedFilters
+            visible={effectiveShowAdvanced && !isInitialState}
+            bookLanguages={bookLanguages}
+            defaultLanguage={defaultLanguageCodes}
+            filters={advancedFilters}
+            onFiltersChange={updateAdvancedFilters}
             searchMode={effectiveSearchMode}
             onSearchModeChange={handleSearchModeChange}
             metadataProviders={metadataProviders}
             activeMetadataProvider={effectiveMetadataProvider}
             onMetadataProviderChange={handleMetadataProviderChange}
+            contentType={effectiveContentType}
+            combinedMode={effectiveCombinedMode}
             isAdmin={requestRoleIsAdmin}
+            onClose={() => setShowAdvanced(false)}
           />
 
-          <ResultsSection
-            books={books}
-            visible={hasResults}
-            onDetails={handleShowDetails}
-            onDownload={handleDownload}
-            onGetReleases={handleGetReleases}
-            getButtonState={getDirectActionButtonState}
-            getUniversalButtonState={getUniversalActionButtonState}
-            sortValue={visibleResultsSort}
-            showSortControl={
-              !activeQueryUsesSeriesBrowse && !activeQueryUsesListBrowse && !resultsSourceUrl
+          {!isInitialState && effectiveActiveQueryTarget === 'manual' && (
+            <p className="px-4 pt-2 text-xs opacity-50 sm:px-6 lg:ml-16 lg:px-8">
+              Manual search queries release sources directly. Some sources may return limited
+              metadata, which can affect file naming templates.
+            </p>
+          )}
+
+          <main
+            className="relative mx-auto w-full max-w-7xl px-4 py-3 sm:px-6 sm:py-6 lg:px-8"
+            style={
+              usePinnedMainScrollContainer
+                ? { display: 'block', flex: '0 0 auto', minHeight: 0 }
+                : undefined
             }
-            onSortChange={(value) => {
-              const request = buildCurrentSearchRequest(value);
-              const shouldPersistAppliedSort = !(
-                effectiveSearchMode === 'universal' &&
-                activeQueryUsesSeriesBrowse &&
-                request.appliedSort === seriesBrowseCapability?.sort
-              );
-              if (shouldPersistAppliedSort) {
-                updateAdvancedFilters({ sort: request.appliedSort });
-              }
-              setActiveResultsSort(request.appliedSort);
-
-              // "Most downloads" is a client-side sort — just re-sort existing books
-              if (request.appliedSort === 'downloads' && effectiveSearchMode === 'direct') {
-                reSortByDownloads();
-                return;
-              }
-
-              runSearchWithPolicyRefresh({
-                query: request.query,
-                fieldValues: request.fieldValues,
-                searchModeOverride: effectiveSearchMode,
-                providerOverride: request.providerOverride,
-                sort: request.appliedSort,
-              });
-            }}
-            metadataSortOptions={resolvedMetadataSortOptions}
-            hasMore={hasMore}
-            isLoadingMore={isLoadingMore}
-            onLoadMore={() => {
-              void loadMore(config, effectiveSearchMode);
-            }}
-            totalFound={totalFound}
-            directTotalResults={directTotalResults}
-            onShowToast={showToast}
-            resultsSourceUrl={resultsSourceUrl}
-          />
-
-          {selectedBook && (
-            <DetailsModal
-              book={selectedBook}
-              onClose={() => setSelectedBook(null)}
-              onDownload={handleDownload}
-              onShowToast={showToast}
-              onFindDownloads={(book) => {
-                setSelectedBook(null);
-                void handleGetReleases(book);
-              }}
-              onSearchSeries={canSearchSeriesForBook(selectedBook) ? handleSearchSeries : undefined}
-              buttonState={
-                isMetadataBook(selectedBook)
-                  ? getUniversalActionButtonState(selectedBook.id)
-                  : getDirectActionButtonState(selectedBook.id)
-              }
-              showReleaseSourceLinks={config?.show_release_source_links !== false}
-            />
-          )}
-
-          {activeReleaseBook && (
-            <ReleaseModal
-              book={activeReleaseBook}
-              onClose={handleReleaseModalClose}
-              onDownload={isBrowseFulfilMode ? handleBrowseFulfilDownload : handleReleaseDownload}
-              onRequestRelease={isBrowseFulfilMode ? undefined : handleReleaseRequest}
-              onRequestBook={
-                isBrowseFulfilMode || !requestRoleIsAdmin ? undefined : handleReleaseBookRequest
-              }
-              getPolicyModeForSource={
-                isBrowseFulfilMode ? () => 'download' : (source, ct) => getSourceMode(source, ct)
-              }
-              supportedFormats={supportedFormats}
-              supportedAudiobookFormats={config?.supported_audiobook_formats || []}
-              contentType={activeReleaseContentType}
-              defaultLanguages={defaultLanguageCodes}
+          >
+            <SearchSection
+              onSearch={handleSearchDispatch}
+              isLoading={isSearching}
+              isInitialState={isInitialState}
+              searchPageTitle={config?.search_page_title || 'Shelfmark'}
               bookLanguages={bookLanguages}
-              currentStatus={statusForButtonState}
-              defaultReleaseSource={config?.default_release_source}
-              defaultAudiobookReleaseSource={config?.default_release_source_audiobook}
-              onSearchSeries={
-                isBrowseFulfilMode || !canSearchSeriesForBook(activeReleaseBook)
-                  ? undefined
-                  : handleSearchSeries
+              defaultLanguage={defaultLanguageCodes}
+              logoUrl={logoUrl}
+              queryValue={activeQueryValue}
+              queryValueLabel={activeQueryValueLabel}
+              onQueryValueChange={handleActiveQueryValueChange}
+              queryTargets={queryTargets}
+              activeQueryTarget={effectiveActiveQueryTarget}
+              onQueryTargetChange={handleQueryTargetChange}
+              showAdvanced={effectiveShowAdvanced}
+              onAdvancedToggle={
+                hasAdvancedContent ? () => setShowAdvanced(!effectiveShowAdvanced) : undefined
               }
-              defaultShowManualQuery={
-                isBrowseFulfilMode || activeReleaseBook?.provider === 'manual'
-              }
-              isRequestMode={isBrowseFulfilMode || activeReleaseBook?.provider === 'manual'}
-              showReleaseSourceLinks={config?.show_release_source_links !== false}
-              onShowToast={showToast}
-              combinedMode={
-                effectiveCombinedState
-                  ? {
-                      phase: effectiveCombinedState.phase,
-                      stepLabel: `Step ${combinedCurrentStep} of ${combinedSelectionPhases.length} — Select ${effectiveCombinedState.phase === 'ebook' ? 'book' : 'audiobook'}`,
-                      ebookMode: effectiveCombinedState.ebookMode,
-                      audiobookMode: effectiveCombinedState.audiobookMode,
-                      stagedEbookRelease: effectiveCombinedState.stagedEbook?.release ?? null,
-                      stagedAudiobookRelease: effectiveCombinedState.stagedAudiobook ?? null,
-                      onNext: !combinedIsFinalStep ? handleCombinedNext : undefined,
-                      onBack: combinedHasPreviousStep ? handleCombinedBack : undefined,
-                      onClearSelection: handleCombinedClearSelection,
-                      onDownload: combinedIsFinalStep
-                        ? (release) => {
-                            void handleCombinedDownload(release);
-                          }
-                        : undefined,
-                    }
-                  : null
-              }
+              advancedFilters={advancedFilters}
+              onAdvancedFiltersChange={updateAdvancedFilters}
+              contentType={effectiveContentType}
+              onContentTypeChange={setContentType}
+              allowedContentTypes={allowedContentTypes}
+              combinedMode={effectiveCombinedMode}
+              combinedModeLocked={combinedModeLocked}
+              onCombinedModeChange={combinedModeAllowed ? setCombinedMode : undefined}
+              activeQueryField={activeQueryField}
+              searchMode={effectiveSearchMode}
+              onSearchModeChange={handleSearchModeChange}
+              metadataProviders={metadataProviders}
+              activeMetadataProvider={effectiveMetadataProvider}
+              onMetadataProviderChange={handleMetadataProviderChange}
+              isAdmin={requestRoleIsAdmin}
             />
-          )}
 
-          {pendingRequestPayload && (
-            <RequestConfirmationModal
-              payload={pendingRequestPayload}
-              extraPayloads={pendingRequestExtraPayloads}
-              allowNotes={allowRequestNotes}
-              onConfirm={handleConfirmRequest}
-              onClose={() => {
-                setPendingRequestPayload(null);
-                setPendingRequestExtraPayloads([]);
+            <ResultsSection
+              books={books}
+              visible={hasResults}
+              onDetails={handleShowDetails}
+              onDownload={handleDownload}
+              onGetReleases={handleGetReleases}
+              getButtonState={getDirectActionButtonState}
+              getUniversalButtonState={getUniversalActionButtonState}
+              sortValue={visibleResultsSort}
+              showSortControl={
+                !activeQueryUsesSeriesBrowse && !activeQueryUsesListBrowse && !resultsSourceUrl
+              }
+              onSortChange={(value) => {
+                const request = buildCurrentSearchRequest(value);
+                const shouldPersistAppliedSort = !(
+                  effectiveSearchMode === 'universal' &&
+                  activeQueryUsesSeriesBrowse &&
+                  request.appliedSort === seriesBrowseCapability?.sort
+                );
+                if (shouldPersistAppliedSort) {
+                  updateAdvancedFilters({ sort: request.appliedSort });
+                }
+                setActiveResultsSort(request.appliedSort);
+
+                // "Most downloads" is a client-side sort — just re-sort existing books
+                if (request.appliedSort === 'downloads' && effectiveSearchMode === 'direct') {
+                  reSortByDownloads();
+                  return;
+                }
+
+                runSearchWithPolicyRefresh({
+                  query: request.query,
+                  fieldValues: request.fieldValues,
+                  searchModeOverride: effectiveSearchMode,
+                  providerOverride: request.providerOverride,
+                  sort: request.appliedSort,
+                });
               }}
+              metadataSortOptions={resolvedMetadataSortOptions}
+              hasMore={hasMore}
+              isLoadingMore={isLoadingMore}
+              onLoadMore={() => {
+                void loadMore(config, effectiveSearchMode);
+              }}
+              totalFound={totalFound}
+              directTotalResults={directTotalResults}
+              onShowToast={showToast}
+              resultsSourceUrl={resultsSourceUrl}
             />
-          )}
 
-          {effectivePendingOnBehalfDownload && (
-            <OnBehalfConfirmationModal
-              isOpen={Boolean(effectivePendingOnBehalfDownload)}
-              actingAsName={pendingOnBehalfUserName}
-              itemTitle={pendingOnBehalfTitle}
-              onConfirm={handleConfirmOnBehalfDownload}
-              onClose={() => setPendingOnBehalfDownload(null)}
+            {selectedBook && (
+              <DetailsModal
+                book={selectedBook}
+                onClose={() => setSelectedBook(null)}
+                onDownload={handleDownload}
+                onShowToast={showToast}
+                onFindDownloads={(book) => {
+                  setSelectedBook(null);
+                  void handleGetReleases(book);
+                }}
+                onSearchSeries={
+                  canSearchSeriesForBook(selectedBook) ? handleSearchSeries : undefined
+                }
+                buttonState={
+                  isMetadataBook(selectedBook)
+                    ? getUniversalActionButtonState(selectedBook.id)
+                    : getDirectActionButtonState(selectedBook.id)
+                }
+                showReleaseSourceLinks={config?.show_release_source_links !== false}
+              />
+            )}
+
+            {activeReleaseBook && (
+              <ReleaseModal
+                book={activeReleaseBook}
+                onClose={handleReleaseModalClose}
+                onDownload={isBrowseFulfilMode ? handleBrowseFulfilDownload : handleReleaseDownload}
+                onRequestRelease={isBrowseFulfilMode ? undefined : handleReleaseRequest}
+                onRequestBook={
+                  isBrowseFulfilMode || !requestRoleIsAdmin ? undefined : handleReleaseBookRequest
+                }
+                getPolicyModeForSource={
+                  isBrowseFulfilMode ? () => 'download' : (source, ct) => getSourceMode(source, ct)
+                }
+                supportedFormats={supportedFormats}
+                supportedAudiobookFormats={config?.supported_audiobook_formats || []}
+                contentType={activeReleaseContentType}
+                defaultLanguages={defaultLanguageCodes}
+                bookLanguages={bookLanguages}
+                currentStatus={statusForButtonState}
+                defaultReleaseSource={config?.default_release_source}
+                defaultAudiobookReleaseSource={config?.default_release_source_audiobook}
+                onSearchSeries={
+                  isBrowseFulfilMode || !canSearchSeriesForBook(activeReleaseBook)
+                    ? undefined
+                    : handleSearchSeries
+                }
+                defaultShowManualQuery={
+                  isBrowseFulfilMode || activeReleaseBook?.provider === 'manual'
+                }
+                isRequestMode={isBrowseFulfilMode || activeReleaseBook?.provider === 'manual'}
+                showReleaseSourceLinks={config?.show_release_source_links !== false}
+                onShowToast={showToast}
+                combinedMode={
+                  effectiveCombinedState
+                    ? {
+                        phase: effectiveCombinedState.phase,
+                        stepLabel: `Step ${combinedCurrentStep} of ${combinedSelectionPhases.length} — Select ${effectiveCombinedState.phase === 'ebook' ? 'book' : 'audiobook'}`,
+                        ebookMode: effectiveCombinedState.ebookMode,
+                        audiobookMode: effectiveCombinedState.audiobookMode,
+                        stagedEbookRelease: effectiveCombinedState.stagedEbook?.release ?? null,
+                        stagedAudiobookRelease: effectiveCombinedState.stagedAudiobook ?? null,
+                        onNext: !combinedIsFinalStep ? handleCombinedNext : undefined,
+                        onBack: combinedHasPreviousStep ? handleCombinedBack : undefined,
+                        onClearSelection: handleCombinedClearSelection,
+                        onDownload: combinedIsFinalStep
+                          ? (release) => {
+                              void handleCombinedDownload(release);
+                            }
+                          : undefined,
+                      }
+                    : null
+                }
+              />
+            )}
+
+            {pendingRequestPayload && (
+              <RequestConfirmationModal
+                payload={pendingRequestPayload}
+                extraPayloads={pendingRequestExtraPayloads}
+                allowNotes={allowRequestNotes}
+                onConfirm={handleConfirmRequest}
+                onClose={() => {
+                  setPendingRequestPayload(null);
+                  setPendingRequestExtraPayloads([]);
+                }}
+              />
+            )}
+
+            {effectivePendingOnBehalfDownload && (
+              <OnBehalfConfirmationModal
+                isOpen={Boolean(effectivePendingOnBehalfDownload)}
+                actingAsName={pendingOnBehalfUserName}
+                itemTitle={pendingOnBehalfTitle}
+                onConfirm={handleConfirmOnBehalfDownload}
+                onClose={() => setPendingOnBehalfDownload(null)}
+              />
+            )}
+          </main>
+
+          <div className={usePinnedMainScrollContainer ? 'mt-auto' : undefined}>
+            <Footer
+              buildVersion={config?.build_version}
+              releaseVersion={config?.release_version}
+              debug={config?.debug}
             />
-          )}
-        </main>
-
-        <div className={usePinnedMainScrollContainer ? 'mt-auto' : undefined}>
-          <Footer
-            buildVersion={config?.build_version}
-            releaseVersion={config?.release_version}
-            debug={config?.debug}
-          />
+          </div>
         </div>
-      </div>
 
-      <ActivitySidebar
-        isOpen={downloadsSidebarOpen}
-        onClose={() => setDownloadsSidebarOpen(false)}
-        status={activitySidebarStatus}
-        isAdmin={requestRoleIsAdmin}
-        onClearCompleted={handleClearCompleted}
-        onCancel={(id) => {
-          void handleCancel(id);
-        }}
-        onRetry={(id) => {
-          void handleRetry(id);
-        }}
-        onDownloadDismiss={handleDownloadDismiss}
-        requestItems={requestItems}
-        dismissedItemKeys={dismissedActivityKeys}
-        historyItems={historyItems}
-        historyLoaded={activityHistoryLoaded}
-        historyHasMore={activityHistoryHasMore}
-        historyLoading={activityHistoryLoading}
-        onHistoryLoadMore={handleActivityHistoryLoadMore}
-        onClearHistory={handleClearHistory}
-        onActiveTabChange={handleActivityTabChange}
-        pendingRequestCount={pendingRequestCount}
-        showRequestsTab={showRequestsTab}
-        isRequestsLoading={isActivitySnapshotLoading}
-        onRequestCancel={showRequestsTab ? handleRequestCancel : undefined}
-        onRequestApprove={requestRoleIsAdmin ? handleRequestApprove : undefined}
-        onRequestReject={requestRoleIsAdmin ? handleRequestReject : undefined}
-        onRequestDismiss={showRequestsTab ? handleRequestDismiss : undefined}
-        onPinnedOpenChange={setSidebarPinnedOpen}
-        pinnedTopOffset={headerHeight}
-      />
+        <ActivitySidebar
+          isOpen={downloadsSidebarOpen}
+          onClose={() => setDownloadsSidebarOpen(false)}
+          status={activitySidebarStatus}
+          isAdmin={requestRoleIsAdmin}
+          onClearCompleted={handleClearCompleted}
+          onCancel={(id) => {
+            void handleCancel(id);
+          }}
+          onRetry={(id) => {
+            void handleRetry(id);
+          }}
+          onDownloadDismiss={handleDownloadDismiss}
+          requestItems={requestItems}
+          dismissedItemKeys={dismissedActivityKeys}
+          historyItems={historyItems}
+          historyLoaded={activityHistoryLoaded}
+          historyHasMore={activityHistoryHasMore}
+          historyLoading={activityHistoryLoading}
+          onHistoryLoadMore={handleActivityHistoryLoadMore}
+          onClearHistory={handleClearHistory}
+          onActiveTabChange={handleActivityTabChange}
+          pendingRequestCount={pendingRequestCount}
+          showRequestsTab={showRequestsTab}
+          isRequestsLoading={isActivitySnapshotLoading}
+          onRequestCancel={showRequestsTab ? handleRequestCancel : undefined}
+          onRequestApprove={requestRoleIsAdmin ? handleRequestApprove : undefined}
+          onRequestReject={requestRoleIsAdmin ? handleRequestReject : undefined}
+          onRequestDismiss={showRequestsTab ? handleRequestDismiss : undefined}
+          onPinnedOpenChange={setSidebarPinnedOpen}
+          pinnedTopOffset={headerHeight}
+        />
 
-      <ToastContainer toasts={toasts} />
+        <ToastContainer toasts={toasts} />
 
-      <SettingsModal
-        isOpen={settingsOpen}
-        authMode={authMode}
-        onClose={() => setSettingsOpen(false)}
-        onShowToast={showToast}
-        onSettingsSaved={handleSettingsSaved}
-        onRefreshAuth={refreshAuth}
-      />
+        <SettingsModal
+          isOpen={settingsOpen}
+          authMode={authMode}
+          onClose={() => setSettingsOpen(false)}
+          onShowToast={showToast}
+          onSettingsSaved={handleSettingsSaved}
+          onRefreshAuth={refreshAuth}
+        />
 
-      <SelfSettingsModal
-        isOpen={selfSettingsOpen}
-        onClose={() => setSelfSettingsOpen(false)}
-        onShowToast={showToast}
-        onSettingsSaved={handleSettingsSaved}
-      />
+        <SelfSettingsModal
+          isOpen={selfSettingsOpen}
+          onClose={() => setSelfSettingsOpen(false)}
+          onShowToast={showToast}
+          onSettingsSaved={handleSettingsSaved}
+        />
 
-      {/* Auto-show banner on startup for users without config */}
-      {config && <ConfigSetupBanner settingsEnabled={config.settings_enabled} />}
+        {/* Auto-show banner on startup for users without config */}
+        {config && <ConfigSetupBanner settingsEnabled={config.settings_enabled} />}
 
-      {/* Controlled banner shown when clicking settings without config */}
-      <ConfigSetupBanner
-        isOpen={configBannerOpen}
-        onClose={() => setConfigBannerOpen(false)}
-        onContinue={() => {
-          setConfigBannerOpen(false);
-          if (authIsAdmin) {
-            void primeUsersCache();
-            void primeSettingsCache();
-            setSettingsOpen(true);
-          } else {
-            setSelfSettingsOpen(true);
-          }
-        }}
-      />
+        {/* Controlled banner shown when clicking settings without config */}
+        <ConfigSetupBanner
+          isOpen={configBannerOpen}
+          onClose={() => setConfigBannerOpen(false)}
+          onContinue={() => {
+            setConfigBannerOpen(false);
+            if (authIsAdmin) {
+              void primeUsersCache();
+              void primeSettingsCache();
+              setSettingsOpen(true);
+            } else {
+              setSelfSettingsOpen(true);
+            }
+          }}
+        />
 
-      {/* Onboarding wizard shown on first run */}
-      <OnboardingModal
-        isOpen={onboardingOpen}
-        onClose={() => setOnboardingOpen(false)}
-        onComplete={() => {
-          void loadConfig('settings-saved');
-        }}
-        onShowToast={showToast}
-      />
+        {/* Onboarding wizard shown on first run */}
+        <OnboardingModal
+          isOpen={onboardingOpen}
+          onClose={() => setOnboardingOpen(false)}
+          onComplete={() => {
+            void loadConfig('settings-saved');
+          }}
+          onShowToast={showToast}
+        />
+      </WantedProvider>
     </SearchModeProvider>
   );
 

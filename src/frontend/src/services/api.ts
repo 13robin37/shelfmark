@@ -9,6 +9,8 @@ import type {
   RequestPolicyResponse,
   CreateRequestPayload,
   RequestRecord,
+  WantedItem,
+  WantedStatus,
   RequestSubmissionResult,
   MetadataProvidersResponse,
   MetadataSearchConfig,
@@ -61,6 +63,7 @@ const API = {
   activityDismiss: `${API_BASE}/activity/dismiss`,
   activityDismissMany: `${API_BASE}/activity/dismiss-many`,
   activityHistory: `${API_BASE}/activity/history`,
+  wanted: `${API_BASE}/wanted`,
 };
 
 // Custom error class for authentication failures
@@ -1072,4 +1075,68 @@ export const updateSelfUser = async (
     method: 'PUT',
     body: JSON.stringify(data),
   });
+};
+
+// Wanted list
+const wantedItemUrl = (id: number, action?: string): string =>
+  `${API.wanted}/${encodeURIComponent(String(id))}${action ? `/${action}` : ''}`;
+
+export const getWantedStatus = async (): Promise<WantedStatus> =>
+  fetchJSON<WantedStatus>(`${API.wanted}/status`);
+
+export const listWanted = async (): Promise<WantedItem[]> => {
+  const response = await fetchJSON<{ items: WantedItem[] }>(API.wanted);
+  return response.items;
+};
+
+export interface WantedBookPayload {
+  title: string;
+  author: string;
+  authors?: string[];
+  provider: string;
+  provider_id: string;
+  isbn_13?: string;
+  isbn_10?: string;
+  year?: string;
+  preview?: string;
+  series_name?: string;
+  series_position?: number;
+  series_count?: number;
+  subtitle?: string;
+  language?: string;
+  source_url?: string;
+  search_title?: string;
+  search_author?: string;
+  titles_by_language?: Record<string, string>;
+  content_type: 'ebook';
+}
+
+export const addWanted = async (
+  book: WantedBookPayload,
+): Promise<{ item: WantedItem; created: boolean }> =>
+  fetchJSON<{ item: WantedItem; created: boolean }>(API.wanted, {
+    method: 'POST',
+    body: JSON.stringify({ book }),
+  });
+
+export const removeWanted = async (id: number, scope?: 'all'): Promise<void> => {
+  await fetchJSON<unknown>(`${wantedItemUrl(id)}${scope ? `?scope=${scope}` : ''}`, {
+    method: 'DELETE',
+  });
+};
+
+export const searchWantedNow = async (id: number): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id, 'search'), { method: 'POST' });
+};
+
+export const pauseWanted = async (id: number): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id, 'pause'), { method: 'POST' });
+};
+
+export const resumeWanted = async (id: number): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id, 'resume'), { method: 'POST' });
+};
+
+export const clearWantedBlocklist = async (id: number): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id, 'blocklist'), { method: 'DELETE' });
 };

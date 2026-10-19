@@ -10,6 +10,7 @@ import { bookSupportsTargets } from '../utils/bookTargetLoader';
 import { isUserCancelledError } from '../utils/errors';
 import { BookTargetDropdown } from './BookTargetDropdown';
 import { LibraryBadge, isInLibrary } from './shared';
+import { WantedToggleButton } from './WantedToggleButton';
 
 interface DetailsModalProps {
   book: Book | null;
@@ -401,6 +402,7 @@ export const DetailsModal = ({
                 </a>
               )}
               <div className="flex w-full flex-col gap-3 sm:ml-auto sm:w-auto sm:flex-row sm:items-center">
+                {isMetadata && <WantedToggleButton book={book} variant="pill" />}
                 {hasBookTargets && bookProvider && bookProviderId && (
                   <BookTargetDropdown
                     provider={bookProvider}
