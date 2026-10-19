@@ -9,7 +9,7 @@ from typing import Any
 
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.request_helpers import normalize_optional_text, now_utc_iso
-from shelfmark.core.text_match import normalize_isbn
+from shelfmark.core.text_match import isbn_variants, normalize_isbn
 
 logger = setup_logger(__name__)
 
@@ -26,6 +26,8 @@ ATTEMPT_QUEUED = "queued"
 ATTEMPT_COMPLETE = "complete"
 ATTEMPT_ERROR = "error"
 ATTEMPT_CANCELLED = "cancelled"
+# A user cancelled this release's download: never offer it again for this item.
+ATTEMPT_REJECTED = "rejected"
 
 # A release that failed in this many separate search cycles is never tried again.
 BLOCK_AFTER_FAILED_CYCLES = 2
@@ -50,6 +52,7 @@ _BOOK_DATA_KEYS = (
     "source_url",
     "search_title",
     "search_author",
+    "titles_by_language",
 )
 
 _UPDATABLE_ITEM_COLUMNS = frozenset(
@@ -107,6 +110,29 @@ def normalize_book_data(book_data: object) -> dict[str, Any]:
         msg = "book data is too large"
         raise WantedServiceError(msg)
     return normalized
+
+
+def canonical_isbn13(isbn_13: object, isbn_10: object = None) -> str | None:
+    """The ISBN-13 form of a book's ISBN, so ISBN-10 and ISBN-13 records compare."""
+    normalized = normalize_isbn(isbn_13)
+    if len(normalized) == 13:
+        return normalized
+    for variant in isbn_variants(isbn_10) | isbn_variants(isbn_13):
+        if len(variant) == 13:
+            return variant
+    return None
+
+
+def _merge_book_data(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Fill gaps in a stored book with what another provider knows about it."""
+    merged = {**incoming, **existing}
+    localized = {
+        **(incoming.get("titles_by_language") or {}),
+        **(existing.get("titles_by_language") or {}),
+    }
+    if localized:
+        merged["titles_by_language"] = localized
+    return merged
 
 
 def _normalize_languages(languages: object) -> list[str] | None:
@@ -170,14 +196,11 @@ class WantedService:
         ).fetchone()
         if row is not None:
             return self._row_to_item(row)
-        isbns = [isbn for isbn in (book.get("isbn_13"), book.get("isbn_10")) if isbn]
-        if not isbns:
+        isbn = book.get("isbn_13")
+        if not isbn:
             return None
-        placeholders = ", ".join("?" for _ in isbns)
         row = conn.execute(
-            f"SELECT * FROM wanted_items WHERE isbn_13 IN ({placeholders}) "  # noqa: S608
-            f"OR isbn_10 IN ({placeholders}) ORDER BY id LIMIT 1",
-            (*isbns, *isbns),
+            "SELECT * FROM wanted_items WHERE isbn_13 = ? ORDER BY id LIMIT 1", (isbn,)
         ).fetchone()
         return self._row_to_item(row)
 
@@ -193,7 +216,7 @@ class WantedService:
         Returns the item and whether a new item was created.
         """
         book = normalize_book_data(book_data)
-        book["isbn_13"] = normalize_isbn(book.get("isbn_13")) or None
+        book["isbn_13"] = canonical_isbn13(book.get("isbn_13"), book.get("isbn_10"))
         book["isbn_10"] = normalize_isbn(book.get("isbn_10")) or None
         book = {key: value for key, value in book.items() if value is not None}
         normalized_languages = _normalize_languages(languages)
@@ -227,6 +250,20 @@ class WantedService:
                     wanted_id = int(cursor.lastrowid or 0)
                 else:
                     wanted_id = int(existing["id"])
+                    merged = _merge_book_data(existing["book_data"], book)
+                    if merged != existing["book_data"]:
+                        conn.execute(
+                            "UPDATE wanted_items SET book_data = ?, "
+                            "isbn_13 = COALESCE(isbn_13, ?), isbn_10 = COALESCE(isbn_10, ?), "
+                            "updated_at = ? WHERE id = ?",
+                            (
+                                json.dumps(merged),
+                                book.get("isbn_13"),
+                                book.get("isbn_10"),
+                                now,
+                                wanted_id,
+                            ),
+                        )
 
                 subscriber = conn.execute(
                     "SELECT id FROM wanted_subscribers "
@@ -373,32 +410,70 @@ class WantedService:
         return items
 
     def find_for_books(
-        self, keys: list[tuple[str, str]], *, user_id: int | None
-    ) -> dict[tuple[str, str], dict[str, Any]]:
-        """Wanted state for metadata books, keyed by ``(provider, provider_id)``."""
-        if not keys:
+        self, books: list[dict[str, Any]], *, user_id: int | None
+    ) -> dict[int, dict[str, Any]]:
+        """Wanted state for metadata books, keyed by their index in ``books``.
+
+        A book matches by provider id or by ISBN, so a book bookmarked from another
+        metadata provider still shows as wanted.
+        """
+        keys = [
+            (str(book["provider"]), str(book["provider_id"]))
+            for book in books
+            if book.get("provider") and book.get("provider_id")
+        ]
+        isbns = {
+            isbn
+            for book in books
+            if (isbn := canonical_isbn13(book.get("isbn_13"), book.get("isbn_10")))
+        }
+        if not keys and not isbns:
             return {}
+        clauses = ["(provider = ? AND provider_id = ?)" for _ in keys]
+        params: list[Any] = [value for key in keys for value in key]
+        if isbns:
+            clauses.append(f"isbn_13 IN ({', '.join('?' for _ in isbns)})")
+            params.extend(sorted(isbns))
         conn = self._connect()
         try:
-            clauses = " OR ".join("(provider = ? AND provider_id = ?)" for _ in keys)
-            params = [value for key in keys for value in key]
             rows = conn.execute(
-                f"""SELECT i.id, i.provider, i.provider_id, i.state,
+                f"""SELECT i.id, i.provider, i.provider_id, i.isbn_13, i.state,
                        EXISTS (SELECT 1 FROM wanted_subscribers s WHERE s.wanted_id = i.id
                                AND IFNULL(s.user_id, 0) = IFNULL(?, 0)) AS subscribed
-                    FROM wanted_items i WHERE {clauses}""",  # noqa: S608
+                    FROM wanted_items i WHERE {" OR ".join(clauses)}""",  # noqa: S608
                 [user_id, *params],
             ).fetchall()
         finally:
             conn.close()
-        return {
-            (row["provider"], row["provider_id"]): {
-                "id": row["id"],
-                "state": row["state"],
-                "subscribed": bool(row["subscribed"]),
-            }
-            for row in rows
-        }
+        by_key = {(row["provider"], row["provider_id"]): row for row in rows}
+        by_isbn = {row["isbn_13"]: row for row in rows if row["isbn_13"]}
+        result: dict[int, dict[str, Any]] = {}
+        for index, book in enumerate(books):
+            row = by_key.get((str(book.get("provider")), str(book.get("provider_id"))))
+            if row is None:
+                isbn = canonical_isbn13(book.get("isbn_13"), book.get("isbn_10"))
+                row = by_isbn.get(isbn) if isbn else None
+            if row is not None:
+                result[index] = {
+                    "id": row["id"],
+                    "state": row["state"],
+                    "subscribed": bool(row["subscribed"]),
+                }
+        return result
+
+    def prune_orphans(self) -> int:
+        """Delete items nobody wants any more (their last subscriber's account was deleted)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cursor = conn.execute(
+                    "DELETE FROM wanted_items WHERE NOT EXISTS ("
+                    "SELECT 1 FROM wanted_subscribers s WHERE s.wanted_id = wanted_items.id)"
+                )
+                conn.commit()
+                return cursor.rowcount
+            finally:
+                conn.close()
 
     def items_in_state(self, state: str) -> list[dict[str, Any]]:
         """All items currently in ``state``."""
@@ -418,6 +493,8 @@ class WantedService:
             rows = conn.execute(
                 """SELECT * FROM wanted_items
                    WHERE state = ? AND next_search_at IS NOT NULL AND next_search_at <= ?
+                     AND EXISTS (SELECT 1 FROM wanted_subscribers s
+                                 WHERE s.wanted_id = wanted_items.id)
                    ORDER BY next_search_at, id LIMIT ?""",
                 (STATE_WAITING, now, limit),
             ).fetchall()
@@ -573,7 +650,7 @@ class WantedService:
         excluded: set[str] = set()
         for row in rows:
             keys = release_attempt_keys(row["source"], row["source_id"], row["match_key"])
-            if row["cycle"] == cycle:
+            if row["cycle"] == cycle or row["status"] == ATTEMPT_REJECTED:
                 excluded |= keys
             if row["status"] == ATTEMPT_ERROR:
                 for key in keys:

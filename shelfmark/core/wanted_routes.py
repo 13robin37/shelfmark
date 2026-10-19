@@ -56,13 +56,13 @@ def serialize_item(
         "last_result": item.get("last_result"),
         "obtained_at": item.get("obtained_at"),
         "obtained_reason": item.get("obtained_reason"),
-        "current_task_id": item.get("current_task_id"),
         "attempt_count": item.get("attempt_count", 0),
         "created_at": item.get("created_at"),
         "subscriber_count": len(subscribers),
         "subscribed": any(sub.get("user_id") == viewer_id for sub in subscribers),
     }
     if is_admin:
+        data["current_task_id"] = item.get("current_task_id")
         data["subscribers"] = [
             {
                 "user_id": sub.get("user_id"),
@@ -104,7 +104,7 @@ def register_wanted_routes(
             )
         return db_user_id, is_admin, None
 
-    def _can_bookmark(viewer_id: int | None) -> bool:
+    def _can_bookmark(viewer_id: int | None, is_admin: bool) -> bool:
         if not wanted_enabled():
             return False
         from shelfmark.release_sources import list_available_sources
@@ -116,7 +116,7 @@ def register_wanted_routes(
         }
         auth_mode = resolve_auth_mode()
         return any(
-            user_may_download(user_db, viewer_id, source, auth_mode=auth_mode)
+            user_may_download(user_db, viewer_id, source, auth_mode=auth_mode, is_admin=is_admin)
             for source in wanted_sources()
             if source in available
         )
@@ -135,10 +135,12 @@ def register_wanted_routes(
 
     @app.route("/api/wanted/status", methods=["GET"])
     def api_wanted_status() -> ResponseReturnValue:
-        viewer_id, _is_admin, gate = _viewer()
+        viewer_id, is_admin, gate = _viewer()
         if gate is not None:
             return gate
-        return jsonify({"enabled": wanted_enabled(), "can_bookmark": _can_bookmark(viewer_id)})
+        return jsonify(
+            {"enabled": wanted_enabled(), "can_bookmark": _can_bookmark(viewer_id, is_admin)}
+        )
 
     @app.route("/api/wanted", methods=["GET"])
     def api_wanted_list() -> ResponseReturnValue:
@@ -168,7 +170,7 @@ def register_wanted_routes(
         content_type = book.get("content_type") if isinstance(book, dict) else None
         if content_type not in (None, WANTED_CONTENT_TYPE):
             return _error("Only ebooks can be bookmarked", 400, code="wanted_ebooks_only")
-        if not _can_bookmark(viewer_id):
+        if not _can_bookmark(viewer_id, is_admin):
             return _error(
                 "You may not download from any wanted source", 403, code="wanted_forbidden"
             )
@@ -280,4 +282,11 @@ def register_wanted_routes(
             return gate
         if _item_for_viewer(wanted_id, viewer_id, is_admin) is None:
             return _error("Wanted item not found", 404)
-        return jsonify({"attempts": wanted_service.list_attempts(wanted_id)})
+        attempts = wanted_service.list_attempts(wanted_id)
+        if not is_admin:
+            hidden = {"source_id", "match_key", "indexer"}
+            attempts = [
+                {key: value for key, value in attempt.items() if key not in hidden}
+                for attempt in attempts
+            ]
+        return jsonify({"attempts": attempts})

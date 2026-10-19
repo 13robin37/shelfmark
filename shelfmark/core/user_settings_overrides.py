@@ -18,6 +18,7 @@ def get_settings_registry() -> ModuleType:
     import_module("shelfmark.config.security")
     import_module("shelfmark.config.settings")
     import_module("shelfmark.config.users_settings")
+    import_module("shelfmark.config.wanted_settings")
     from shelfmark.core import settings_registry
 
     return settings_registry

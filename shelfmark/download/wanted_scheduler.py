@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 import time
 from collections import deque
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from shelfmark.config.env import TMP_DIR
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import QueueStatus
@@ -35,6 +37,7 @@ from shelfmark.core.wanted_service import (
     ATTEMPT_CANCELLED,
     ATTEMPT_COMPLETE,
     ATTEMPT_ERROR,
+    ATTEMPT_REJECTED,
     STATE_DOWNLOADING,
     STATE_OBTAINED,
     STATE_PAUSED,
@@ -45,6 +48,7 @@ from shelfmark.core.wanted_service import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from shelfmark.core.user_db import UserDB
     from shelfmark.metadata_providers import BookMetadata
@@ -89,6 +93,43 @@ def _iso_after(hours: float) -> str:
 
 def _positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _held_copies_dir() -> Path:
+    return TMP_DIR / "wanted"
+
+
+def delivery_target(user_id: int | None, username: str | None) -> str:
+    """Where a download for this user ends up; subscribers sharing it share one delivery."""
+    from shelfmark.core.utils import get_destination
+
+    mode = str(config.get("BOOKS_OUTPUT_MODE", "folder", user_id=user_id) or "folder")
+    mode = mode.strip().lower()
+    if mode == "email":
+        recipient = str(config.get("EMAIL_RECIPIENT", "", user_id=user_id) or "").strip().lower()
+        return f"email:{recipient}"
+    if mode == "booklore":
+        library = config.get("BOOKLORE_LIBRARY_ID", "", user_id=user_id)
+        path = config.get("BOOKLORE_PATH_ID", "", user_id=user_id)
+        return f"booklore:{library}:{path}"
+    return f"folder:{get_destination(is_audiobook=False, user_id=user_id, username=username)}"
+
+
+def _copy_path(source: Path, target_dir: Path) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source.name
+    if source.is_dir():
+        shutil.copytree(source, target)
+    else:
+        shutil.copy2(source, target)
+    return target
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def release_to_queue_payload(
@@ -146,6 +187,10 @@ class WantedScheduler:
         self._cycles: dict[int, _Cycle] = {}
         self._searches: deque[float] = deque()
         self._source_fingerprint: str | None = None
+        # Download worker threads and the terminal hook touch these, the scheduler too.
+        self._delivery_lock = threading.Lock()
+        self._payloads: dict[str, dict[str, Any]] = {}
+        self._held: dict[str, list[tuple[list[dict[str, Any]], Path]]] = {}
 
     # -- lifecycle -------------------------------------------------------------------
 
@@ -153,6 +198,8 @@ class WantedScheduler:
         """Start the background thread once."""
         if self._thread is not None and self._thread.is_alive():
             return
+        # Copies held for deliveries do not survive a restart; neither does their task.
+        shutil.rmtree(_held_copies_dir(), ignore_errors=True)
         self._thread = threading.Thread(target=self._run, daemon=True, name="WantedScheduler")
         self._thread.start()
 
@@ -186,6 +233,7 @@ class WantedScheduler:
         """One scheduling step: continue running cycles, then start at most one search."""
         if not wanted_enabled():
             return
+        self._service.prune_orphans()
         self._detect_source_changes()
         self._continue_cycles()
         if self._should_yield():
@@ -502,6 +550,8 @@ class WantedScheduler:
         )
         payload = release_to_queue_payload(release, item["book_data"], wanted_id)
         username = owner.get("username")
+        with self._delivery_lock:
+            self._payloads[release.source_id] = payload
         success, error = self._queue_release(
             payload, 0, user_id=_positive_int(owner.get("user_id")), username=username
         )
@@ -512,6 +562,7 @@ class WantedScheduler:
             self._changed(wanted_id)
             return True
         logger.info("Wanted: could not queue %s from %s: %s", release.title, release.source, error)
+        self._forget_task(release.source_id)
         self._service.finish_attempt(wanted_id, release.source_id, ATTEMPT_CANCELLED, error)
         self._service.update_item(
             wanted_id, expected_state=STATE_DOWNLOADING, state=STATE_SEARCHING, current_task_id=None
@@ -571,6 +622,7 @@ class WantedScheduler:
             return
         item = self._service.get_item(wanted_id)
         if item is None or item.get("current_task_id") != task_id:
+            self._forget_task(task_id)
             return
         message = getattr(task, "status_message", None)
         message = message.strip() if isinstance(message, str) and message.strip() else None
@@ -581,7 +633,7 @@ class WantedScheduler:
         elif status == QueueStatus.CANCELLED and not (message or "").startswith(
             _STALLED_MESSAGE_PREFIX
         ):
-            self._service.finish_attempt(wanted_id, task_id, ATTEMPT_CANCELLED, message)
+            self._service.finish_attempt(wanted_id, task_id, ATTEMPT_REJECTED, message)
             self._cycles.pop(wanted_id, None)
             self._service.update_item(
                 wanted_id,
@@ -604,18 +656,106 @@ class WantedScheduler:
             )
             self._changed(wanted_id)
             self.wake()
+        self._forget_task(task_id)
+
+    # -- delivery ------------------------------------------------------------------
+
+    def _delivery_groups(self, wanted_id: int, task: Any) -> list[list[dict[str, Any]]]:
+        """Pending subscribers allowed this download, grouped by delivery target.
+
+        The group of the user the download runs for comes first; the download itself
+        delivers to it.
+        """
+        source = str(getattr(task, "source", "") or "")
+        receivers = self._users_allowed(self._pending_subscribers(wanted_id), source)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for sub in receivers:
+            target = delivery_target(_positive_int(sub.get("user_id")), sub.get("username"))
+            groups.setdefault(target, []).append(sub)
+        owner_id = getattr(task, "user_id", None)
+        return sorted(
+            groups.values(),
+            key=lambda group: not any(sub.get("user_id") == owner_id for sub in group),
+        )
+
+    def on_downloaded_file(self, task: Any, path: Path) -> None:
+        """Hold a copy of a wanted download for every other delivery target."""
+        wanted_id = _positive_int(getattr(task, "wanted_id", None))
+        task_id = getattr(task, "task_id", None)
+        if wanted_id is None or not isinstance(task_id, str):
+            return
+        item = self._service.get_item(wanted_id)
+        if item is None or item.get("current_task_id") != task_id:
+            return
+        extra_groups = self._delivery_groups(wanted_id, task)[1:]
+        if not extra_groups:
+            return
+        digest = hashlib.sha256(task_id.encode()).hexdigest()[:16]
+        held: list[tuple[list[dict[str, Any]], Path]] = []
+        for index, group in enumerate(extra_groups, start=1):
+            copy = _copy_path(path, _held_copies_dir() / f"{digest}-{index}")
+            held.append((group, copy))
+        with self._delivery_lock:
+            previous = self._held.pop(task_id, [])
+            self._held[task_id] = held
+        for _group, copy in previous:
+            _remove_path(copy.parent)
+        logger.info("Wanted: holding %d extra delivery copy(ies) of %s", len(held), item["title"])
+
+    def _forget_task(self, task_id: str) -> None:
+        with self._delivery_lock:
+            self._payloads.pop(task_id, None)
+            held = self._held.pop(task_id, [])
+        for _group, copy in held:
+            _remove_path(copy.parent)
+
+    def _queue_extra_delivery(
+        self,
+        wanted_id: int,
+        task_id: str,
+        index: int,
+        group: list[dict[str, Any]],
+        copy: Path,
+        payload: dict[str, Any],
+    ) -> bool:
+        delivery_payload = {key: value for key, value in payload.items() if key != "_wanted_id"}
+        delivery_payload["source_id"] = f"{task_id}#wanted-{wanted_id}-{index}"
+        delivery_payload["_staged_path"] = str(copy)
+        owner = group[0]
+        success, error = self._queue_release(
+            delivery_payload,
+            0,
+            user_id=_positive_int(owner.get("user_id")),
+            username=owner.get("username"),
+        )
+        if not success:
+            logger.warning("Wanted: could not queue a delivery of %s: %s", task_id, error)
+            return False
+        self._service.mark_delivered(
+            wanted_id, [sub.get("user_id") for sub in group], delivery_payload["source_id"]
+        )
+        return True
 
     def _deliver(self, item: dict[str, Any], task: Any) -> None:
         wanted_id = item["id"]
-        source = str(getattr(task, "source", "") or "")
-        pending = self._pending_subscribers(wanted_id)
-        receivers = self._users_allowed(pending, source)
-        self._service.mark_delivered(
-            wanted_id, [sub.get("user_id") for sub in receivers], getattr(task, "task_id", None)
-        )
+        task_id = str(getattr(task, "task_id", "") or "")
+        groups = self._delivery_groups(wanted_id, task)
+        if groups:
+            self._service.mark_delivered(
+                wanted_id, [sub.get("user_id") for sub in groups[0]], task_id
+            )
+        with self._delivery_lock:
+            held = self._held.pop(task_id, [])
+            payload = self._payloads.get(task_id)
+        for index, (group, copy) in enumerate(held, start=1):
+            if payload is None or not self._queue_extra_delivery(
+                wanted_id, task_id, index, group, copy, payload
+            ):
+                _remove_path(copy.parent)
         self._cycles.pop(wanted_id, None)
-        if len(receivers) < len(pending):
-            # Someone may not download from this source; keep looking for them.
+        if self._pending_subscribers(wanted_id):
+            # Someone may not download from this source, or had no copy to receive;
+            # keep looking for them.
             self._service.update_item(
                 wanted_id,
                 state=STATE_WAITING,

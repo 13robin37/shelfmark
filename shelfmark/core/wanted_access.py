@@ -18,14 +18,19 @@ WANTED_CONTENT_TYPE = "ebook"
 
 
 def user_may_download(
-    user_db: UserDB | None, user_id: int | None, source: str, *, auth_mode: str
+    user_db: UserDB | None,
+    user_id: int | None,
+    source: str,
+    *,
+    auth_mode: str,
+    is_admin: bool = False,
 ) -> bool:
     """Whether ``user_id`` may download ebooks from ``source`` without a request.
 
     The session-free counterpart of the guard on /api/releases/download, so the
     background job can apply it to every subscriber.
     """
-    if auth_mode == "none" or user_db is None or user_id is None:
+    if is_admin or auth_mode == "none" or user_db is None or user_id is None:
         return True
     user = user_db.get_user(user_id=user_id)
     if user is None:

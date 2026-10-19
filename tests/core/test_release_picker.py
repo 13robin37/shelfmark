@@ -50,7 +50,10 @@ def test_title_match_score_matches_the_frontend(title, candidate, expected):
         "Dune",
         "Frank Herbert - Dune (1965) [epub] retail",
         "Dune: Deluxe Edition",
-        "Dune - Book 1",
+        "Dune (Dune Chronicles #1)",
+        "Frank Herbert - Dune [ENG] (1965)",
+        "Dune.1965.eBook-AlkPub",
+        "Dune 9780441172719",
     ],
 )
 def test_names_the_book_accepts_the_same_work(title):
@@ -130,12 +133,14 @@ def test_pick_releases_orders_by_match_then_format_then_source():
 
     picked = pick_releases(releases, BOOK, PREFS)
 
+    # Every accepted release is the book, so format and source decide; an exact
+    # title only breaks ties within the same format and source.
     assert [release.source_id for release in picked] == [
         "aa-epub",
+        "deluxe-epub",
         "libgen-epub",
         "mobi",
         "pdf",
-        "deluxe-epub",
         "no-format",
     ]
 
@@ -167,3 +172,78 @@ def test_pick_releases_prefers_seeded_torrents():
         "many",
         "few",
     ]
+
+
+@pytest.mark.parametrize(
+    ("book", "title"),
+    [
+        ({"title": "Saga, Vol. 1"}, "Saga, Vol. 4"),
+        ({"title": "Heartstopper: Volume 1"}, "Heartstopper Volume 2"),
+        ({"title": "Persepolis"}, "Persepolis 2"),
+        ({"title": "Diary of a Wimpy Kid", "series_position": 1}, "Diary of a Wimpy Kid 05"),
+        ({"title": "Dune"}, "Dune - Book 2"),
+    ],
+)
+def test_names_the_book_rejects_another_volume(book, title):
+    assert not names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+
+
+@pytest.mark.parametrize(
+    ("book", "title"),
+    [
+        ({"title": "Dune", "series_position": 1.0}, "Dune - Book 1"),
+        ({"title": "Catch-22", "author": "Joseph Heller"}, "Catch-22"),
+        ({"title": "1984", "author": "George Orwell"}, "George Orwell - 1984"),
+        ({"title": "Bird Box", "author": "Josh Malerman"}, "Bird Box"),
+        ({"title": "The Complete Maus"}, "The Complete Maus"),
+        (
+            {"title": "Senlin Ascends", "series_name": "The Books of Babel"},
+            "Senlin Ascends (The Books of Babel #1)",
+        ),
+        ({"title": "Мастер и Маргарита"}, "Мастер и Маргарита"),
+        ({"title": "ノルウェイの森"}, "ノルウェイの森"),
+        (
+            {
+                "title": "Harry Potter and the Philosopher's Stone",
+                "titles_by_language": {"de": "Harry Potter und der Stein der Weisen"},
+            },
+            "Harry Potter und der Stein der Weisen",
+        ),
+    ],
+)
+def test_names_the_book_accepts_numbers_markers_and_scripts_the_book_carries(book, title):
+    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+
+
+def test_format_preference_beats_title_variants():
+    releases = [
+        _release("Dune.", source_id="mobi", format="mobi"),
+        _release(source_id="pdf", format="pdf"),
+        _release("Dune (Deluxe Edition)", source_id="epub"),
+    ]
+    prefs = PickerPreferences(
+        supported_formats=PREFS.supported_formats, preferred_formats=("epub", "mobi", "pdf")
+    )
+
+    assert [release.source_id for release in pick_releases(releases, BOOK, prefs)] == [
+        "epub",
+        "mobi",
+        "pdf",
+    ]
+
+
+def test_audiobook_releases_are_rejected():
+    release = _release("Frank Herbert - Dune (Unabridged) [M4B]", format=None)
+    release.content_type = "audiobook"
+
+    assert pick_releases([release], BOOK, PREFS) == []
+
+
+def test_unknown_language_placeholder_passes():
+    assert language_matches("unknown", ["de"]) is True
+    assert language_matches("en, unknown", ["en"]) is True
+
+
+def test_match_key_only_for_sources_with_unstable_ids():
+    assert release_match_key(_release(source="direct_download")) is None
+    assert release_match_key(_release(source="prowlarr", format="epub")) is not None

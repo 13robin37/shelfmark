@@ -107,6 +107,7 @@ class Config:
             import_module("shelfmark.config.security")
             import_module("shelfmark.config.settings")
             import_module("shelfmark.config.users_settings")
+            import_module("shelfmark.config.wanted_settings")
             import_module("shelfmark.metadata_providers")
             import_module("shelfmark.release_sources")
         except ImportError:

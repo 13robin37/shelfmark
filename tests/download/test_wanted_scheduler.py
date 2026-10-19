@@ -200,6 +200,9 @@ def test_a_user_cancel_pauses_but_a_stall_moves_on(env):
     env.scheduler.tick()
     env.finish(wanted_id, QueueStatus.CANCELLED, "Cancelled")
     assert env.item(wanted_id)["state"] == STATE_PAUSED
+    # The cancelled release is never offered again.
+    assert "id:direct_download:libgen:1" not in env.service.excluded_release_keys(wanted_id, 99)
+    assert "id:libgen:libgen:1" in env.service.excluded_release_keys(wanted_id, 99)
 
 
 def test_a_book_already_in_the_library_is_not_downloaded(env):
@@ -348,3 +351,107 @@ def test_release_payload_matches_the_release_modal():
         "language": "en",
         "_wanted_id": 7,
     }
+
+
+class _Task(SimpleNamespace):
+    pass
+
+
+def _downloaded(env, wanted_id, tmp_path):
+    item = env.item(wanted_id)
+    payload, user_id, _ = env.queued[-1]
+    book = tmp_path / "download" / "Dune.epub"
+    book.parent.mkdir(exist_ok=True)
+    book.write_text("book")
+    task = _Task(
+        wanted_id=wanted_id,
+        task_id=item["current_task_id"],
+        source=payload["source"],
+        user_id=user_id,
+        status_message=None,
+    )
+    env.scheduler.on_downloaded_file(task, book)
+    return task
+
+
+@pytest.fixture
+def two_targets(env, tmp_path):
+    targets = {env.alice["id"]: "folder:/books/alice", env.bob["id"]: "email:bob@example.com"}
+    with (
+        patch.object(ws, "delivery_target", side_effect=lambda user_id, _name: targets[user_id]),
+        patch.object(ws, "_held_copies_dir", return_value=tmp_path / "held"),
+    ):
+        yield targets
+
+
+def test_another_target_gets_its_own_delivery_task_from_a_copy(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    task = _downloaded(env, wanted_id, tmp_path)
+
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+
+    delivery, user_id, username = env.queued[-1]
+    assert (user_id, username) == (env.bob["id"], "bob")
+    assert delivery["source_id"] == f"aa-1#wanted-{wanted_id}-1"
+    assert "_wanted_id" not in delivery
+    assert (tmp_path / "held").exists()
+    assert delivery["_staged_path"].endswith("Dune.epub")
+    subscribers = env.service.list_subscribers(wanted_id)
+    assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", delivery["source_id"]]
+    assert env.item(wanted_id)["state"] == STATE_OBTAINED
+
+
+def test_copies_are_dropped_when_the_download_fails(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    task = _downloaded(env, wanted_id, tmp_path)
+    assert any((tmp_path / "held").rglob("Dune.epub"))
+
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.ERROR, task)
+
+    assert not any((tmp_path / "held").rglob("Dune.epub"))
+
+
+def test_a_shared_target_needs_no_copy(env, tmp_path):
+    with (
+        patch.object(ws, "delivery_target", return_value="folder:/books"),
+        patch.object(ws, "_held_copies_dir", return_value=tmp_path / "held"),
+    ):
+        wanted_id = env.add()
+        env.add(user=env.bob)
+        env.scheduler.tick()
+        task = _downloaded(env, wanted_id, tmp_path)
+        env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+
+    assert not (tmp_path / "held").exists()
+    assert len(env.queued) == 1
+    assert all(sub["delivered_at"] for sub in env.service.list_subscribers(wanted_id))
+
+
+def test_a_target_without_a_copy_keeps_its_subscriber_waiting(env, two_targets):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    item = env.item(wanted_id)
+    task = _Task(
+        wanted_id=wanted_id,
+        task_id=item["current_task_id"],
+        source="direct_download",
+        user_id=env.alice["id"],
+        status_message=None,
+    )
+
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+
+    item = env.item(wanted_id)
+    assert item["state"] == STATE_WAITING
+    pending = [
+        sub["user_id"] for sub in env.service.list_subscribers(wanted_id) if not sub["delivered_at"]
+    ]
+    assert pending == [env.bob["id"]]

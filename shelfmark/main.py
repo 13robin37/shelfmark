@@ -625,6 +625,7 @@ if wanted_service is not None:
             logger.info("Startup: %d interrupted wanted item(s) will search again", _reset_wanted)
     except sqlite3.Error as exc:
         logger.warning("Could not reset interrupted wanted items at startup: %s", exc)
+    backend.set_downloaded_file_listener(wanted_scheduler.on_downloaded_file)
     wanted_scheduler.start()
 
 
@@ -2936,17 +2937,15 @@ def _attach_wanted_states(book_dicts: list[dict[str, Any]]) -> None:
 
     if wanted_service is None or not wanted_enabled():
         return
-    keys = [
-        (str(book_dict["provider"]), str(book_dict["provider_id"]))
-        for book_dict in book_dicts
-        if book_dict.get("provider") and book_dict.get("provider_id")
-    ]
+    sees_all = get_auth_mode() == "none" or bool(session.get("is_admin", False))
     viewer_id = normalize_positive_int(session.get("db_user_id"))
-    states = wanted_service.find_for_books(keys, user_id=viewer_id)
-    for book_dict in book_dicts:
-        state = states.get((str(book_dict.get("provider")), str(book_dict.get("provider_id"))))
-        if state is not None:
-            book_dict["wanted"] = state
+    if viewer_id is None and not sees_all:
+        return
+    states = wanted_service.find_for_books(book_dicts, user_id=viewer_id)
+    for index, state in states.items():
+        # Other users' bookmarks stay private to them.
+        if sees_all or state["subscribed"]:
+            book_dicts[index]["wanted"] = state
 
 
 def _attach_library_ownership(book: Any, book_dict: dict[str, Any]) -> None:

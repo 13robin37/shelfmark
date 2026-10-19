@@ -36,7 +36,7 @@ from shelfmark.release_sources import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 logger = setup_logger(__name__)
 _RNG = random.SystemRandom()
@@ -83,6 +83,7 @@ _COORDINATOR_LOOP_ERROR_MAX_DELAY = 30.0
 _PROGRESS_BROADCAST_START_PERCENT = 1
 _PROGRESS_BROADCAST_COMPLETE_PERCENT = 99
 _PROGRESS_BROADCAST_MIN_DELTA = 10
+_downloaded_file_listener: Callable[[DownloadTask, Path], None] | None = None
 
 
 def _is_plain_email_address(value: str) -> bool:
@@ -256,6 +257,7 @@ def queue_release(
         wanted_id: int | None = None
         if isinstance(raw_wanted_id, int) and raw_wanted_id > 0:
             wanted_id = raw_wanted_id
+        staged_path = normalize_optional_text(release_data.get("_staged_path"))
         search_mode = _parse_release_search_mode(release_data.get("search_mode"))
 
         # Get author, year, preview, and content_type from top-level (preferred) or extra (fallback)
@@ -333,6 +335,7 @@ def queue_release(
             username=username,
             request_id=request_id,
             wanted_id=wanted_id,
+            staged_path=staged_path,
             **retry_resolution_fields,
         )
 
@@ -830,6 +833,11 @@ def _download_task(task_id: str, cancel_flag: Event) -> str | None:
                 exc_type="MissingDownloadPath",
             )
             return None
+        if _downloaded_file_listener is not None:
+            try:
+                _downloaded_file_listener(task, temp_file)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning("Task %s: downloaded-file listener failed: %s", task_id, exc)
 
     # Check cancellation before post-processing
     if cancel_flag.is_set():
@@ -873,6 +881,12 @@ def _download_task(task_id: str, cancel_flag: Event) -> str | None:
         _clear_task_error_state(task)
 
     return result
+
+
+def set_downloaded_file_listener(listener: Callable[[DownloadTask, Path], None] | None) -> None:
+    """Register a callback that sees each freshly downloaded file before post-processing."""
+    global _downloaded_file_listener
+    _downloaded_file_listener = listener
 
 
 def update_download_progress(book_id: str, progress: float) -> None:

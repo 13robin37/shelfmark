@@ -140,12 +140,49 @@ def test_find_for_books_reports_state_and_subscription(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
 
     states = service.find_for_books(
-        [("hardcover", "123"), ("hardcover", "999")], user_id=users[1]["id"]
+        [
+            {"provider": "hardcover", "provider_id": "999"},
+            {"provider": "hardcover", "provider_id": "123"},
+            {"provider": "google", "provider_id": "gY", "isbn_10": "0441172717"},
+        ],
+        user_id=users[1]["id"],
     )
 
-    assert states == {
-        ("hardcover", "123"): {"id": item["id"], "state": STATE_WAITING, "subscribed": False}
-    }
+    expected = {"id": item["id"], "state": STATE_WAITING, "subscribed": False}
+    assert states == {1: expected, 2: expected}
+
+
+def test_isbn_10_and_isbn_13_records_join(service, users):
+    first, _ = service.add(
+        user_id=users[0]["id"], book_data=_book(isbn_13=None, isbn_10="0441013597")
+    )
+    second, created = service.add(
+        user_id=users[1]["id"],
+        book_data=_book(provider="google", provider_id="g", isbn_13="9780441013593"),
+    )
+
+    assert created is False
+    assert second["id"] == first["id"]
+    assert first["isbn_13"] == "9780441013593"
+
+
+def test_joining_fills_gaps_in_the_stored_book(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    joined, _ = service.add(
+        user_id=users[1]["id"],
+        book_data=_book(
+            provider="openlibrary",
+            provider_id="OL1W",
+            title="Other Title",
+            search_title="Dune",
+            titles_by_language={"de": "Der Wüstenplanet"},
+        ),
+    )
+
+    assert joined["id"] == item["id"]
+    assert joined["book_data"]["title"] == "Dune"
+    assert joined["book_data"]["search_title"] == "Dune"
+    assert joined["book_data"]["titles_by_language"] == {"de": "Der Wüstenplanet"}
 
 
 def test_due_items_and_mark_all_due(service, users):
@@ -226,6 +263,23 @@ def test_mark_delivered_and_find_by_task(service, users):
     assert service.find_by_task("md5a")["id"] == item["id"]
     service.mark_delivered(item["id"], [users[0]["id"]], "md5a")
     assert service.list_subscribers(item["id"])[0]["delivered_at"] is not None
+
+
+def test_a_rejected_release_is_never_offered_again(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    _attempt(service, item["id"], cycle=1)
+    service.finish_attempt(item["id"], "md5a", "rejected", "Cancelled")
+
+    assert "id:direct_download:md5a" in service.excluded_release_keys(item["id"], 7)
+
+
+def test_orphaned_items_are_not_searched_and_get_pruned(service, users, db_path):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    UserDB(db_path).delete_user(users[0]["id"])
+
+    assert service.due_items("2999-01-01T00:00:00+00:00", 10) == []
+    assert service.prune_orphans() == 1
+    assert service.get_item(item["id"]) is None
 
 
 def test_deleting_a_user_drops_their_subscription(service, users, db_path):

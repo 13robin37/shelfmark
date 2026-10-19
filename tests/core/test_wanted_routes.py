@@ -90,9 +90,45 @@ def test_bookmark_list_and_join(env):
     listed = client.get("/api/wanted").get_json()["items"]
     assert [(entry["id"], entry["subscriber_count"]) for entry in listed] == [(item["id"], 2)]
 
+    assert "current_task_id" not in listed[0]
+
     _login(env, env["admin"], is_admin=True)
     admin_items = client.get("/api/wanted").get_json()["items"]
     assert [sub["username"] for sub in admin_items[0]["subscribers"]] == ["alice", "bob"]
+    assert "current_task_id" in admin_items[0]
+
+
+def test_attempts_hide_release_identities_from_non_admins(env):
+    client = env["client"]
+    service = env["service"]
+    _login(env, env["alice"])
+    item_id = client.post("/api/wanted", json={"book": BOOK}).get_json()["item"]["id"]
+    service.record_attempt(
+        item_id,
+        cycle=1,
+        source="prowlarr",
+        source_id="12:https://tracker/torrent/1",
+        match_key="m",
+        release_title="Dune",
+        file_format="epub",
+        size="1 MB",
+        indexer="tracker",
+    )
+
+    attempt = client.get(f"/api/wanted/{item_id}/attempts").get_json()["attempts"][0]
+    assert {"source_id", "indexer", "match_key"}.isdisjoint(attempt)
+    _login(env, env["admin"], is_admin=True)
+    admin_attempt = client.get(f"/api/wanted/{item_id}/attempts").get_json()["attempts"][0]
+    assert admin_attempt["source_id"] == "12:https://tracker/torrent/1"
+
+
+def test_a_session_admin_may_bookmark_regardless_of_role(env):
+    _login(env, env["alice"], is_admin=True)
+    with patch(
+        "shelfmark.core.wanted_access.load_users_request_policy_settings",
+        return_value={"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_book"},
+    ):
+        assert env["client"].get("/api/wanted/status").get_json()["can_bookmark"] is True
 
 
 def test_status_reports_whether_the_viewer_may_bookmark(env):
