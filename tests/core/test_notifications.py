@@ -2,6 +2,8 @@
 
 import logging
 
+import pytest
+
 from shelfmark.core import notifications as notifications_module
 
 
@@ -147,6 +149,27 @@ def test_render_message_uses_request_approved_copy():
 
     assert title == "Request Approved"
     assert "was approved." in body
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        (None, 'Bookmarked "Dune" by Frank Herbert was downloaded.'),
+        (
+            "is already in your library",
+            'Bookmarked "Dune" by Frank Herbert is already in your library.',
+        ),
+    ],
+)
+def test_render_message_for_obtained_wanted_book(detail, expected):
+    context = notifications_module.NotificationContext(
+        event=notifications_module.NotificationEvent.WANTED_OBTAINED,
+        title="Dune",
+        author="Frank Herbert",
+        detail=detail,
+    )
+
+    assert notifications_module._render_message(context) == ("Wanted Book Available", expected)
 
 
 def test_notify_admin_submits_non_blocking_when_route_matches_event(monkeypatch):

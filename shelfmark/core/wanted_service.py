@@ -367,6 +367,17 @@ class WantedService:
         finally:
             conn.close()
 
+    def all_subscriber_ids(self) -> set[int]:
+        """Users with at least one bookmark."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM wanted_subscribers WHERE user_id IS NOT NULL"
+            ).fetchall()
+            return {int(row["user_id"]) for row in rows}
+        finally:
+            conn.close()
+
     def list_items(self, *, user_id: int | None, include_all: bool) -> list[dict[str, Any]]:
         """Items visible to a viewer, newest first, each with subscribers and attempt count."""
         conn = self._connect()

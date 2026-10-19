@@ -411,7 +411,9 @@ class WantedScheduler:
         book = self._resolve_book(item["book_data"])
         if self._in_library(book):
             logger.info("Wanted: %s is already in the library", item["title"])
-            self._service.mark_delivered(wanted_id, [sub.get("user_id") for sub in pending], None)
+            pending_ids = [sub.get("user_id") for sub in pending]
+            self._service.mark_delivered(wanted_id, pending_ids, None)
+            self._notify_obtained(item, pending_ids, reason="in_library")
             self._mark_obtained(item, reason="in_library")
             return
 
@@ -600,6 +602,30 @@ class WantedScheduler:
         if updated is not None:
             self._changed(item["id"])
 
+    def _notify_obtained(
+        self, item: dict[str, Any], user_ids: list[int | None], *, reason: str
+    ) -> None:
+        from shelfmark.core.notifications import (
+            NotificationContext,
+            NotificationEvent,
+            notify_admin,
+            notify_user,
+        )
+
+        context = NotificationContext(
+            event=NotificationEvent.WANTED_OBTAINED,
+            title=item["title"],
+            author=item.get("author") or "Unknown author",
+            content_type=WANTED_CONTENT_TYPE,
+            detail="is already in your library" if reason == "in_library" else "was downloaded",
+        )
+        try:
+            notify_admin(NotificationEvent.WANTED_OBTAINED, context)
+            for user_id in {_positive_int(user_id) for user_id in user_ids} - {None}:
+                notify_user(user_id, NotificationEvent.WANTED_OBTAINED, context)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("Wanted: could not send notifications for %s: %s", item["title"], exc)
+
     def _mark_obtained(self, item: dict[str, Any], *, reason: str) -> None:
         self._cycles.pop(item["id"], None)
         self._service.update_item(
@@ -741,9 +767,9 @@ class WantedScheduler:
         task_id = str(getattr(task, "task_id", "") or "")
         groups = self._delivery_groups(wanted_id, task)
         if groups:
-            self._service.mark_delivered(
-                wanted_id, [sub.get("user_id") for sub in groups[0]], task_id
-            )
+            owner_group_ids = [sub.get("user_id") for sub in groups[0]]
+            self._service.mark_delivered(wanted_id, owner_group_ids, task_id)
+            self._notify_obtained(item, owner_group_ids, reason="downloaded")
         with self._delivery_lock:
             held = self._held.pop(task_id, [])
             payload = self._payloads.get(task_id)

@@ -455,3 +455,53 @@ def test_a_target_without_a_copy_keeps_its_subscriber_waiting(env, two_targets):
         sub["user_id"] for sub in env.service.list_subscribers(wanted_id) if not sub["delivered_at"]
     ]
     assert pending == [env.bob["id"]]
+
+
+def test_obtaining_notifies_the_admin_and_the_delivered_subscribers(env):
+    sent: list[tuple[str, int | None, str]] = []
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    with (
+        patch(
+            "shelfmark.core.notifications.notify_admin",
+            side_effect=lambda event, ctx: sent.append(("admin", None, ctx.detail)),
+        ),
+        patch(
+            "shelfmark.core.notifications.notify_user",
+            side_effect=lambda user_id, event, ctx: sent.append(("user", user_id, ctx.detail)),
+        ),
+    ):
+        env.finish(wanted_id, QueueStatus.COMPLETE)
+
+    assert sorted(sent, key=str) == sorted(
+        [
+            ("admin", None, "was downloaded"),
+            ("user", env.alice["id"], "was downloaded"),
+            ("user", env.bob["id"], "was downloaded"),
+        ],
+        key=str,
+    )
+
+
+def test_a_book_in_the_library_notifies_with_that_detail(env):
+    env.in_library = True
+    env.add()
+    details: list[str] = []
+    with (
+        patch("shelfmark.core.notifications.notify_admin"),
+        patch(
+            "shelfmark.core.notifications.notify_user",
+            side_effect=lambda _uid, _event, ctx: details.append(ctx.detail),
+        ),
+    ):
+        env.scheduler.tick()
+
+    assert details == ["is already in your library"]
+
+
+def test_changes_are_reported_to_listeners(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+
+    assert wanted_id in env.changed

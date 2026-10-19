@@ -601,6 +601,41 @@ if user_db is not None:
     except _IMPORT_OPERATIONAL_ERRORS as e:
         logger.warning("Failed to register request routes: %s", e)
 
+
+def _emit_wanted_update(wanted_id: int | None) -> None:
+    """Tell admins and the affected subscribers that the wanted list changed."""
+    emit_ws_event(
+        ws_manager, event_name="wanted_update", room="admins", payload={"wanted_id": wanted_id}
+    )
+    if wanted_service is None:
+        return
+    try:
+        if wanted_id is None:
+            user_ids = wanted_service.all_subscriber_ids()
+        else:
+            user_ids = {
+                sub["user_id"]
+                for sub in wanted_service.list_subscribers(wanted_id)
+                if sub.get("user_id") is not None
+            }
+    except sqlite3.Error as exc:
+        logger.warning("Could not resolve wanted update recipients: %s", exc)
+        return
+    for user_id in user_ids:
+        emit_ws_event(
+            ws_manager,
+            event_name="wanted_update",
+            room=f"user_{user_id}",
+            payload={"wanted_id": wanted_id},
+        )
+
+
+def _on_wanted_route_change(wanted_id: int | None) -> None:
+    if wanted_scheduler is not None:
+        wanted_scheduler.wake()
+    _emit_wanted_update(wanted_id)
+
+
 wanted_scheduler: WantedScheduler | None = None
 if wanted_service is not None:
     import_module("shelfmark.config.wanted_settings")
@@ -611,13 +646,14 @@ if wanted_service is not None:
         user_db,
         resolve_auth_mode=_resolve_auth_mode_for_routes,
         queue_release=_queue_release_for_routes,
+        on_change=_emit_wanted_update,
     )
     register_wanted_routes(
         app,
         user_db,
         wanted_service,
         resolve_auth_mode=_resolve_auth_mode_for_routes,
-        on_change=lambda _wanted_id: wanted_scheduler.wake() if wanted_scheduler else None,
+        on_change=_on_wanted_route_change,
     )
     try:
         _reset_wanted = wanted_service.reset_interrupted()

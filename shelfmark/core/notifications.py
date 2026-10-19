@@ -71,6 +71,7 @@ class NotificationEvent(StrEnum):
     REQUEST_REJECTED = "request_rejected"
     DOWNLOAD_COMPLETE = "download_complete"
     DOWNLOAD_FAILED = "download_failed"
+    WANTED_OBTAINED = "wanted_obtained"
 
 
 @dataclass
@@ -86,6 +87,7 @@ class NotificationContext:
     source: str | None = None
     admin_note: str | None = None
     error_message: str | None = None
+    detail: str | None = None
 
 
 def _normalize_urls(value: object) -> list[str]:
@@ -326,6 +328,7 @@ def _resolve_notify_type(event: NotificationEvent) -> object:
             NotificationEvent.REQUEST_REJECTED: "warning",
             NotificationEvent.DOWNLOAD_COMPLETE: "success",
             NotificationEvent.DOWNLOAD_FAILED: "failure",
+            NotificationEvent.WANTED_OBTAINED: "success",
         }
         return fallback[event]
 
@@ -335,6 +338,7 @@ def _resolve_notify_type(event: NotificationEvent) -> object:
         NotificationEvent.REQUEST_REJECTED: apprise.NotifyType.WARNING,
         NotificationEvent.DOWNLOAD_COMPLETE: apprise.NotifyType.SUCCESS,
         NotificationEvent.DOWNLOAD_FAILED: apprise.NotifyType.FAILURE,
+        NotificationEvent.WANTED_OBTAINED: apprise.NotifyType.SUCCESS,
     }
     return mapping[event]
 
@@ -363,6 +367,9 @@ def _render_message(context: NotificationContext) -> tuple[str, str]:
         )
     if event == NotificationEvent.DOWNLOAD_COMPLETE:
         return "Download Complete", f'"{title}" by {author} downloaded successfully.'
+    if event == NotificationEvent.WANTED_OBTAINED:
+        detail = _clean_text(context.detail, "was downloaded")
+        return "Wanted Book Available", f'Bookmarked "{title}" by {author} {detail}.'
 
     error_message = _clean_text(context.error_message, "")
     error_line = f"\nError: {error_message}" if error_message else ""
