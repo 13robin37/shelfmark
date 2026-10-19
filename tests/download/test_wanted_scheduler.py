@@ -50,14 +50,20 @@ class _Env:
         self.in_library = False
         self.policy = {"REQUESTS_ENABLED": False}
         self.changed: list[int | None] = []
+        self.cancelled: list[str] = []
         self.scheduler = ws.WantedScheduler(
             self.service,
             self.user_db,
             resolve_auth_mode=lambda: "builtin",
             queue_release=self._queue_release,
             task_lookup=self._lookup,
+            cancel_task=self._cancel,
             on_change=self.changed.append,
         )
+
+    def _cancel(self, task_id):
+        self.cancelled.append(task_id)
+        return True
 
     def _queue_release(self, payload, priority, *, user_id=None, username=None, **kwargs):
         del priority
@@ -345,6 +351,73 @@ def test_disabled_wanted_list_does_nothing(env):
     with patch.object(ws, "wanted_enabled", return_value=False):
         env.scheduler.tick()
     assert env.queued == []
+
+
+def test_switching_off_lets_running_downloads_end_without_starting_new_ones(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    with patch.object(ws, "wanted_enabled", return_value=False):
+        env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
+        env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert len(env.queued) == 1
+    assert item["state"] == STATE_WAITING
+    assert item["next_search_at"] is not None
+
+
+def test_a_download_nobody_wants_any_more_is_cancelled(env):
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+
+    env.service.remove_subscriber(wanted_id, env.alice["id"])
+    env.scheduler.tick()
+    assert env.cancelled == []
+
+    env.service.remove_subscriber(wanted_id, env.bob["id"])
+    env.scheduler.tick()
+    assert env.cancelled == ["aa-1"]
+
+
+def test_only_enabled_formats_are_downloaded(env):
+    env.results = {"direct_download": ([_release("aa-pdf", fmt="pdf")], None)}
+    with patch.object(ws, "supported_formats", return_value=frozenset({"epub", "pdf"})):
+        wanted_id = env.add()
+        env.scheduler.tick()
+
+    assert env.queued == []
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+
+
+def test_the_library_only_counts_for_folder_targets(env):
+    env.in_library = True
+    targets = {env.alice["id"]: "folder:/books", env.bob["id"]: "email:bob@example.com"}
+    with patch.object(ws, "delivery_target", side_effect=lambda user_id, _name: targets[user_id]):
+        wanted_id = env.add()
+        env.add(user=env.bob)
+        env.scheduler.tick()
+
+    subscribers = {sub["user_id"]: sub for sub in env.service.list_subscribers(wanted_id)}
+    assert subscribers[env.alice["id"]]["delivered_at"] is not None
+    assert subscribers[env.bob["id"]]["delivered_at"] is None
+    assert env.queued[-1][1] == env.bob["id"]
+
+
+def test_an_item_nobody_may_download_rests_until_rights_change(env):
+    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+    wanted_id = env.add()
+    env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert env.queued == []
+    assert item["state"] == STATE_WAITING
+    assert item["next_search_at"] is None
+    assert "No source" in item["last_result"]
+
+    env.user_db.set_user_settings(env.alice["id"], {"REQUEST_POLICY_DEFAULT_EBOOK": "download"})
+    env.scheduler.tick()
+    assert env.queued[-1][1] == env.alice["id"]
 
 
 def test_release_payload_matches_the_release_modal():

@@ -4,21 +4,23 @@ Bookmark an ebook that is not available yet, and Shelfmark downloads it on its o
 
 ## Using it
 
-- Click the **eye** on a search result, in the book details or in the release dialog to bookmark a book. Click it again to remove your bookmark.
+- Click the **eye** on a search result, in the book details or in the release dialog to bookmark a book. Click it again to remove your bookmark. Once nobody wants a book any more, a download still running for it is cancelled.
 - The **Wanted** tab in the activity sidebar lists your bookmarks with their state, the last search result and when the next search runs. **Search now** runs a search at the next opportunity.
-- Admins see every bookmark and who wants it, and can pause, resume, retry failed releases or delete an entry for everyone.
+- Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases or delete an entry for everyone.
 
 The eye only appears for ebooks from a metadata provider, and only for users who may download directly from at least one wanted-list source. Users whose policy requires a request do not see it.
 
 ## How it searches
 
 1. A bookmarked book is searched within a few minutes, then again after growing intervals (**Search Intervals**, default 1, 6 and 24 hours). The last interval repeats for as long as the book stays bookmarked; a bookmark never gives up.
-2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide.
-3. The best release is downloaded. If it fails, the next one is tried. A release that fails in two separate searches is skipped for 30 days. Cancelling a wanted download rejects that release for good.
-4. Changing sources, mirrors, indexers or request policies makes every waiting bookmark search again at once, so a newly added source is tried immediately.
-5. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading.
+2. Each search asks every enabled source in **Sources** and ranks all releases together: releases must name the book (no other volume, sequel or bundle, no contradicting author), then **Preferred Formats** and the source order decide. Only enabled formats are downloaded; PDF and comic formats are off by default.
+3. The best release is downloaded. If it fails, the next one is tried. A release that fails in two separate searches is skipped for 30 days. Cancelling a wanted download rejects that release until an admin clicks **Retry failed releases**.
+4. Changing sources, mirrors, indexers, wanted-list sources or formats, or anyone's request policy or role makes every waiting bookmark search again at once, so a newly added source is tried immediately. A bookmark that no available source may serve for its users rests until one of these changes.
+5. A book already in your library (see [Library Check](library-check.md)) is marked as obtained without downloading for users whose downloads go to a folder. Users receiving books by email or in BookLore still get it delivered.
 
 Background searches give way to searches users run themselves and are capped by **Max Searches per Hour**. IRC is off by default because its results are cached for 30 days.
+
+Switching the wanted list off stops new searches. Downloads already running finish and are recorded; bookmarks are kept for when it is switched on again.
 
 ## Several users, one book
 

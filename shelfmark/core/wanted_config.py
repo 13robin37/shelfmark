@@ -16,7 +16,17 @@ _DEFAULT_SOURCES: tuple[tuple[str, bool], ...] = (
     ("newznab", True),
     ("irc", False),
 )
-_DEFAULT_FORMATS = ("epub", "azw3", "mobi", "fb2", "pdf", "djvu", "cbz", "cbr")
+# Fixed-layout and comic formats are off by default: rarely what an ebook reader wants.
+_DEFAULT_FORMATS: tuple[tuple[str, bool], ...] = (
+    ("epub", True),
+    ("azw3", True),
+    ("mobi", True),
+    ("fb2", True),
+    ("pdf", False),
+    ("djvu", False),
+    ("cbz", False),
+    ("cbr", False),
+)
 
 
 def default_source_order() -> list[dict[str, Any]]:
@@ -24,9 +34,9 @@ def default_source_order() -> list[dict[str, Any]]:
     return [{"id": source, "enabled": enabled} for source, enabled in _DEFAULT_SOURCES]
 
 
-def default_format_order() -> list[str]:
-    """Formats offered by WANTED_PREFERRED_FORMATS, in default order."""
-    return list(_DEFAULT_FORMATS)
+def default_format_order() -> list[dict[str, Any]]:
+    """Default value of WANTED_PREFERRED_FORMATS."""
+    return [{"id": fmt, "enabled": enabled} for fmt, enabled in _DEFAULT_FORMATS]
 
 
 def _ordered_entries(value: object, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -48,9 +58,8 @@ def wanted_sources() -> list[str]:
 
 
 def preferred_formats() -> tuple[tuple[str, ...], frozenset[str]]:
-    """(format preference order, formats never to download automatically)."""
-    default = [{"id": fmt, "enabled": True} for fmt in _DEFAULT_FORMATS]
-    entries = _ordered_entries(config.get("WANTED_PREFERRED_FORMATS"), default)
+    """(formats to download automatically, best first; formats switched off)."""
+    entries = _ordered_entries(config.get("WANTED_PREFERRED_FORMATS"), default_format_order())
     order = tuple(entry["id"].lower() for entry in entries if entry.get("enabled", True))
     excluded = frozenset(entry["id"].lower() for entry in entries if not entry.get("enabled", True))
     return order, excluded
@@ -62,7 +71,7 @@ def supported_formats() -> frozenset[str]:
     if isinstance(value, str):
         value = [part.strip() for part in value.split(",")]
     if not isinstance(value, list):
-        return frozenset(_DEFAULT_FORMATS)
+        return frozenset(fmt for fmt, _enabled in _DEFAULT_FORMATS)
     return frozenset(str(fmt).strip().lower() for fmt in value if str(fmt).strip())
 
 

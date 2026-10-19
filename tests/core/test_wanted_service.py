@@ -274,12 +274,23 @@ def test_mark_delivered(service, users):
     assert service.list_subscribers(item["id"])[0]["delivered_at"] is not None
 
 
-def test_a_rejected_release_is_never_offered_again(service, users):
+def test_a_rejected_release_is_skipped_until_the_blocklist_is_cleared(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     _attempt(service, item["id"], cycle=1)
     service.finish_attempt(item["id"], "md5a", "rejected", "Cancelled")
 
     assert "id:direct_download:md5a" in service.excluded_release_keys(item["id"], 7)
+    assert service.clear_blocklist(item["id"]) == 1
+    assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 7)
+
+
+def test_a_new_subscriber_wakes_a_resting_item(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    service.update_item(item["id"], next_search_at=None)
+
+    rejoined, _ = service.add(user_id=users[1]["id"], book_data=_book())
+
+    assert rejoined["next_search_at"] is not None
 
 
 def test_orphaned_items_are_not_searched_and_get_pruned(service, users, db_path):

@@ -1034,7 +1034,7 @@ Custom label for the OIDC sign-in button on the login page.
 |----------|-------------|------|---------|
 | `WANTED_ENABLED` | Let users bookmark ebooks. Shelfmark then searches the sources below in the background, downloads the best matching release and keeps looking until the book is obtained, including when new sources or releases appear. | boolean | `false` |
 | `WANTED_SOURCES` | Sources searched for bookmarked books, in order of preference. IRC is off by default: its results are cached for 30 days and identical searches are limited. | JSON array | _see UI for defaults_ |
-| `WANTED_PREFERRED_FORMATS` | Formats in order of preference. Disabled formats are never downloaded automatically. Formats must also be allowed under Supported Book Formats. | JSON array | _see UI for defaults_ |
+| `WANTED_PREFERRED_FORMATS` | Formats in order of preference. Only enabled formats are downloaded automatically; PDF and comic formats are off by default. Formats must also be allowed under Supported Book Formats. | JSON array | _see UI for defaults_ |
 | `WANTED_SEARCH_BACKOFF_HOURS` | Hours to wait between searches for a book that was not found, comma separated. The last value repeats for as long as the book stays bookmarked. | string | `1, 6, 24` |
 | `WANTED_MAX_SEARCHES_PER_HOUR` | Upper limit for background searches across all bookmarked books. | number | `6` |
 
@@ -1063,7 +1063,7 @@ Sources searched for bookmarked books, in order of preference. IRC is off by def
 
 **Preferred Formats**
 
-Formats in order of preference. Disabled formats are never downloaded automatically. Formats must also be allowed under Supported Book Formats.
+Formats in order of preference. Only enabled formats are downloaded automatically; PDF and comic formats are off by default. Formats must also be allowed under Supported Book Formats.
 
 - **Type:** JSON array
 - **Default:** _see UI for defaults_

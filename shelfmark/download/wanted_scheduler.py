@@ -197,6 +197,7 @@ class WantedScheduler:
         resolve_auth_mode: Callable[[], str],
         queue_release: Callable[..., tuple[bool, str | None]],
         task_lookup: Callable[[str], tuple[QueueStatus | None, Any]] | None = None,
+        cancel_task: Callable[[str], bool] | None = None,
         on_change: Callable[[int | None], None] | None = None,
     ) -> None:
         """Wire the scheduler to its store, the download queue and change listeners."""
@@ -205,6 +206,7 @@ class WantedScheduler:
         self._resolve_auth_mode = resolve_auth_mode
         self._queue_release = queue_release
         self._task_lookup = task_lookup
+        self._cancel_task = cancel_task
         self._on_change = on_change
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -260,11 +262,14 @@ class WantedScheduler:
 
     def tick(self) -> None:
         """One scheduling step: continue running cycles, then start at most one search."""
+        self._cancel_unwanted()
+        self._reconcile_downloads()
         if not wanted_enabled():
+            # Downloads already running finish and are recorded; nothing new starts.
+            self._park_cycles()
             return
         self._service.prune_orphans()
         self._detect_source_changes()
-        self._reconcile_downloads()
         self._continue_cycles()
         due = self._service.due_items(now_utc_iso(), 1)
         if due and not self._should_yield(due[0]):
@@ -294,6 +299,8 @@ class WantedScheduler:
         snapshot = {
             "sources": self._available_sources(),
             "tabs": {tab: load_config_file(tab) for tab in _SOURCE_SETTINGS_TABS},
+            "formats": preferred_formats()[0],
+            "users": self._user_policies(),
         }
         fingerprint = hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, default=str).encode()
@@ -305,6 +312,47 @@ class WantedScheduler:
             logger.info("Wanted: source settings changed, %d item(s) due now", made_due)
             if made_due:
                 self._changed(None)
+
+    def _user_policies(self) -> list[tuple[Any, ...]]:
+        from shelfmark.core.request_policy import filter_request_policy_settings
+
+        if self._user_db is None:
+            return []
+        return [
+            (
+                user["id"],
+                user.get("role"),
+                filter_request_policy_settings(self._user_db.get_user_settings(user["id"])),
+            )
+            for user in self._user_db.list_users()
+        ]
+
+    def _cancel_unwanted(self) -> None:
+        """Cancel downloads of items nobody wants any more."""
+        if self._cancel_task is None or self._task_lookup is None:
+            return
+        with self._delivery_lock:
+            task_ids = [*self._payloads, *self._extras]
+        for task_id in task_ids:
+            status, task = self._task_lookup(task_id)
+            wanted_id = _positive_int(getattr(task, "wanted_id", None))
+            if status is None or status in TERMINAL_QUEUE_STATUSES or wanted_id is None:
+                continue
+            if self._service.get_item(wanted_id) is None:
+                logger.info("Wanted: nobody wants task %s any more; cancelling it", task_id)
+                self._cancel_task(task_id)
+
+    def _park_cycles(self) -> None:
+        for item in self._service.items_in_state(STATE_SEARCHING):
+            self._cycles.pop(item["id"], None)
+            parked = self._service.update_item(
+                item["id"],
+                expected_state=STATE_SEARCHING,
+                state=STATE_WAITING,
+                next_search_at=now_utc_iso(),
+            )
+            if parked is not None:
+                self._changed(item["id"])
 
     def _reconcile_downloads(self) -> None:
         """Finish attempts whose end the terminal hook missed (a crash in it, a lost task)."""
@@ -491,30 +539,47 @@ class WantedScheduler:
 
         book = self._resolve_book(item["book_data"])
         if self._in_library(book):
-            logger.info("Wanted: %s is already in the library", item["title"])
-            pending_ids = [sub.get("user_id") for sub in pending]
-            self._service.mark_delivered(wanted_id, pending_ids, None)
-            self._notify_obtained(item, pending_ids, reason="in_library")
-            self._mark_obtained(item, reason="in_library")
-            return
+            # Only those whose downloads go to a folder have it; email and BookLore
+            # subscribers still want it delivered.
+            in_library = [
+                sub
+                for sub in pending
+                if delivery_target(
+                    _positive_int(sub.get("user_id")), sub.get("username")
+                ).startswith("folder:")
+            ]
+            if in_library:
+                logger.info("Wanted: %s is already in the library", item["title"])
+                library_ids = [sub.get("user_id") for sub in in_library]
+                self._service.mark_delivered(wanted_id, library_ids, None)
+                self._notify_obtained(item, library_ids, reason="in_library")
+                pending = [sub for sub in pending if sub not in in_library]
+            if not pending:
+                self._mark_obtained(item, reason="in_library")
+                return
 
         sources = [
             source for source in self._available_sources() if self._users_allowed(pending, source)
         ]
         if not sources:
-            self._end_cycle(
-                item,
-                found_nothing=True,
-                source_errors=False,
-                result="No allowed source is available",
+            # Rests until sources, rights or subscribers change; searching cannot help.
+            self._cycles.pop(wanted_id, None)
+            self._service.update_item(
+                wanted_id,
+                expected_state=STATE_SEARCHING,
+                state=STATE_WAITING,
+                next_search_at=None,
+                last_result="No source the subscribers may download from is available",
             )
+            self._changed(wanted_id)
             return
 
         self._searches.append(time.monotonic())
         releases, answered, failed = self._search(sources, book, pending)
+        formats = preferred_formats()[0]
         prefs = PickerPreferences(
-            supported_formats=supported_formats(),
-            preferred_formats=preferred_formats()[0],
+            supported_formats=supported_formats() & frozenset(formats),
+            preferred_formats=formats,
             excluded_formats=preferred_formats()[1],
             source_order=tuple(sources),
             languages=tuple(self._search_languages(pending) or ()),

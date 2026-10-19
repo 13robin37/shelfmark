@@ -3,8 +3,21 @@
 Status: umgesetzt auf Branch `feat/wanted-list` (Nutzer-Doku: `docs/wanted-list.md`).
 Abweichungen der Umsetzung vom ursprünglichen Konzept, aus den Gegenproben:
 
-- Bricht ein Nutzer einen Merklisten-Download ab, wird dieses Release dauerhaft verworfen und
-  das nächste probiert; der Eintrag wird nicht pausiert (Pausieren bleibt Admins vorbehalten).
+- Bricht ein Nutzer einen Merklisten-Download ab, wird dieses Release verworfen und das nächste
+  probiert; der Eintrag wird nicht pausiert (Pausieren bleibt Admins vorbehalten). „Retry failed
+  releases“ gibt fehlgeschlagene und verworfene Releases wieder frei.
+- Entscheidungen nach der Abschlussprüfung:
+  - Nur in „Preferred Formats“ aktivierte Formate werden geladen; PDF, DJVU, CBZ und CBR sind
+    standardmäßig aus.
+  - Ein Treffer der Bibliotheksprüfung gilt nur für Vormerker mit Ordner-Ziel; E-Mail- und
+    BookLore-Empfänger bekommen das Buch trotzdem zugestellt.
+  - Will niemand mehr ein Buch, wird sein laufender Download abgebrochen.
+  - Darf keiner der Vormerker aus einer verfügbaren Quelle laden, ruht der Eintrag (keine
+    Suchen), bis sich Quellen, Rechte, Rollen oder Vormerker ändern.
+  - Abschalten der Merkliste stoppt neue Suchen; laufende Downloads laufen zu Ende und werden
+    verbucht.
+  - Merklisten-Quellen und -Formate sowie Rechte und Rollen pro Nutzer lösen wie die globalen
+    Quellen-Einstellungen eine sofortige Neusuche aus.
 - Gesperrte Releases (zwei Fehlschläge in getrennten Durchgängen) werden nach 30 Tagen wieder
   zugelassen, damit ein Ausfall einer Quelle nicht dauerhaft alles sperrt.
 - Fehler auf unserer Seite (Ziel nicht beschreibbar, E-Mail/BookLore, Worker-Ausnahmen) sind

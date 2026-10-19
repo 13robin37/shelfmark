@@ -216,7 +216,7 @@ export function WantedProvider({
       clearBlocklist: (item) =>
         run(
           () => clearWantedBlocklist(item.id),
-          `Failed releases of "${item.title}" may be tried again`,
+          `Failed and cancelled releases of "${item.title}" may be tried again`,
         ),
       refresh,
     }),

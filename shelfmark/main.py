@@ -652,6 +652,7 @@ if wanted_service is not None:
         resolve_auth_mode=_resolve_auth_mode_for_routes,
         queue_release=_queue_release_for_routes,
         task_lookup=_wanted_task_lookup,
+        cancel_task=backend.cancel_download,
         on_change=_emit_wanted_update,
     )
     register_wanted_routes(

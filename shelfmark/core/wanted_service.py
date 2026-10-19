@@ -292,6 +292,13 @@ class WantedService:
                             "obtained_reason = NULL, updated_at = ? WHERE id = ?",
                             (STATE_WAITING, now, now, wanted_id),
                         )
+                    elif existing is not None:
+                        # A resting item (nobody could download it) may be searchable now.
+                        conn.execute(
+                            "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
+                            "WHERE id = ? AND state = ? AND next_search_at IS NULL",
+                            (now, now, wanted_id, STATE_WAITING),
+                        )
                 elif normalized_languages is not None:
                     conn.execute(
                         "UPDATE wanted_subscribers SET languages = ? WHERE id = ?",
@@ -680,13 +687,13 @@ class WantedService:
             conn.close()
 
     def clear_blocklist(self, wanted_id: int) -> int:
-        """Forget failed attempts so those releases may be tried again."""
+        """Forget failed and rejected attempts so those releases may be tried again."""
         with self._lock:
             conn = self._connect()
             try:
                 cursor = conn.execute(
-                    "DELETE FROM wanted_attempts WHERE wanted_id = ? AND status = ?",
-                    (wanted_id, ATTEMPT_ERROR),
+                    "DELETE FROM wanted_attempts WHERE wanted_id = ? AND status IN (?, ?)",
+                    (wanted_id, ATTEMPT_ERROR, ATTEMPT_REJECTED),
                 )
                 conn.commit()
                 return cursor.rowcount

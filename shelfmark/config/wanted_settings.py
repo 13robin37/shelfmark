@@ -44,7 +44,7 @@ def _source_options() -> list[dict[str, object]]:
 
 
 def _format_options() -> list[dict[str, object]]:
-    return [{"id": fmt, "label": fmt.upper()} for fmt in default_format_order()]
+    return [{"id": entry["id"], "label": entry["id"].upper()} for entry in default_format_order()]
 
 
 @register_settings("wanted", "Wanted List", icon="eye", order=8)
@@ -84,11 +84,12 @@ def wanted_settings() -> list[SettingsField]:
             key="WANTED_PREFERRED_FORMATS",
             label="Preferred Formats",
             description=(
-                "Formats in order of preference. Disabled formats are never downloaded "
-                "automatically. Formats must also be allowed under Supported Book Formats."
+                "Formats in order of preference. Only enabled formats are downloaded "
+                "automatically; PDF and comic formats are off by default. Formats must also be "
+                "allowed under Supported Book Formats."
             ),
             options=_format_options,
-            default=[{"id": fmt, "enabled": True} for fmt in default_format_order()],
+            default=default_format_order(),
             show_when={"field": "WANTED_ENABLED", "value": True},
         ),
         HeadingField(
