@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock
 
@@ -100,3 +101,39 @@ def test_re_adding_a_task_cancelled_while_queued_dispatches_it_once():
     first = queue.get_next()
     assert first is not None and first[0] == "md5"
     assert queue.get_next() is None
+
+
+def test_a_staged_delivery_task_only_post_processes_its_copy(monkeypatch, tmp_path):
+    import shelfmark.download.orchestrator as orchestrator
+
+    copy = tmp_path / "held" / "Dune.epub"
+    copy.parent.mkdir()
+    copy.write_text("book")
+    queue = BookQueue()
+    handler = MagicMock()
+    seen: list[Path] = []
+    monkeypatch.setattr(orchestrator, "book_queue", queue)
+    monkeypatch.setattr(orchestrator, "ws_manager", None)
+    monkeypatch.setattr(orchestrator, "get_source", lambda _source: _AvailableSource())
+    monkeypatch.setattr(orchestrator, "get_handler", lambda _source: handler)
+    monkeypatch.setattr(
+        orchestrator,
+        "post_process_download",
+        lambda temp_file, *_args, **_kwargs: seen.append(temp_file) or "folder://done",
+    )
+
+    ok, _error = orchestrator.queue_release(
+        {"source": "direct_download", "source_id": "md5~wanted-3-1", "title": "Dune"},
+        user_id=2,
+        username="bob",
+        wanted_id=3,
+        staged_path=str(copy),
+    )
+    task = queue.get_task("md5~wanted-3-1")
+
+    assert ok is True
+    assert orchestrator._download_task("md5~wanted-3-1", Event()) == "folder://done"
+    handler.download.assert_not_called()
+    assert seen == [copy]
+    assert task.can_retry_without_staged_source is False
+    assert orchestrator.serialize_task_for_retry(task)["can_retry_without_staged_source"] is False

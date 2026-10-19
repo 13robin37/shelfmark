@@ -289,3 +289,17 @@ def test_deleting_a_user_drops_their_subscription(service, users, db_path):
     UserDB(db_path).delete_user(users[0]["id"])
 
     assert [sub["user_id"] for sub in service.list_subscribers(item["id"])] == [users[1]["id"]]
+
+
+def test_blocks_expire_so_an_outage_does_not_block_a_release_forever(service, users, db_path):
+    import sqlite3
+
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    for cycle in (1, 2):
+        _attempt(service, item["id"], cycle=cycle)
+        service.finish_attempt(item["id"], "md5a", ATTEMPT_ERROR, "down")
+    assert "id:direct_download:md5a" in service.excluded_release_keys(item["id"], 3)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE wanted_attempts SET finished_at = '2000-01-01T00:00:00+00:00'")
+    assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 3)

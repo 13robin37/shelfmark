@@ -9,6 +9,7 @@ must name the book and must not name another work, volume or bundle.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +88,28 @@ _SERIES_MARKER_PATTERN = re.compile(r"\([^()]*#\s*\d+(?:\.\d+)?[^()]*\)")
 # A scene release group suffix, as in "Dune.1965.eBook-AlkPub".
 _RELEASE_GROUP_PATTERN = re.compile(r"-[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$")
 _WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
+_APOSTROPHES = re.compile(r"['\u2019\u02bc]")
+# Volume numbers written as Roman numerals ("Vol. II"); I, V and X alone are too often
+# words or initials to count.
+_ROMAN_NUMERALS = {
+    "ii": 2,
+    "iii": 3,
+    "iv": 4,
+    "vi": 6,
+    "vii": 7,
+    "viii": 8,
+    "ix": 9,
+    "xi": 11,
+    "xii": 12,
+    "xiii": 13,
+    "xiv": 14,
+    "xv": 15,
+    "xvi": 16,
+    "xvii": 17,
+    "xviii": 18,
+    "xix": 19,
+    "xx": 20,
+}
 
 MAX_EBOOK_SIZE_BYTES = 200 * 1024 * 1024
 LANGUAGE_OPTION_ALL = "all"
@@ -186,11 +209,23 @@ def _has_author_match(release: Release, author_candidates: list[str]) -> bool:
     )
 
 
+def _fold(text: str) -> str:
+    """Casefold and drop accents and apostrophes, so "Schätzing" matches "Schatzing"."""
+    decomposed = unicodedata.normalize("NFKD", _APOSTROPHES.sub("", text.casefold()))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
 def _words(text: object) -> list[str]:
     """Unicode word tokens, so non-Latin titles compare as well as Latin ones."""
     if not isinstance(text, str):
         return []
-    return [word for word in _WORD_PATTERN.findall(text.casefold()) if word != "_"]
+    return [word for word in _WORD_PATTERN.findall(_fold(text)) if word != "_"]
+
+
+def _number_of(word: str) -> int | None:
+    if word.isdigit():
+        return int(word)
+    return _ROMAN_NUMERALS.get(word)
 
 
 def _significant(words: Iterable[str]) -> list[str]:
@@ -199,10 +234,11 @@ def _significant(words: Iterable[str]) -> list[str]:
 
 def _numbers(words: Iterable[str]) -> set[int]:
     """Standalone numbers other than years: volume and sequel numbers."""
+    numbers = {_number_of(word) for word in words}
     return {
-        int(word)
-        for word in words
-        if word.isdigit() and int(word) <= _MAX_VOLUME_NUMBER and int(word) not in _YEAR_RANGE
+        number
+        for number in numbers
+        if number is not None and number <= _MAX_VOLUME_NUMBER and number not in _YEAR_RANGE
     }
 
 
@@ -224,14 +260,16 @@ def _book_words(book: dict[str, Any], author_candidates: list[str]) -> set[str]:
         words |= set(_words(book.get(key)))
     for author in author_candidates:
         words |= set(author.split(" "))
+    raw_authors = book.get("authors")
+    for author in [book.get("author"), *(raw_authors if isinstance(raw_authors, list) else [])]:
+        words |= set(_words(author))
     return words
 
 
 def _book_numbers(book: dict[str, Any]) -> set[int]:
     numbers: set[int] = set()
-    for title in _raw_titles(book):
-        numbers |= {int(word) for word in _words(title) if word.isdigit()}
-    numbers |= {int(word) for word in _words(book.get("subtitle")) if word.isdigit()}
+    for text in [*_raw_titles(book), book.get("subtitle")]:
+        numbers |= {number for word in _words(text) if (number := _number_of(word)) is not None}
     position = book.get("series_position")
     if (
         isinstance(position, (int, float))
@@ -254,7 +292,11 @@ def names_the_book(release: Release, book: dict[str, Any]) -> bool:
 
     if (release_word_set & COLLECTION_MARKERS) - book_words:
         return False
-    if _numbers(release_words) - _book_numbers(book):
+    # A word the book's own metadata uses ("Xi" in an author's name) is no numeral.
+    release_numbers = _numbers(
+        word for word in release_words if word.isdigit() or word not in book_words
+    )
+    if release_numbers - _book_numbers(book):
         return False
 
     def matches(title: str) -> bool:

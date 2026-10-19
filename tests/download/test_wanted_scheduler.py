@@ -66,7 +66,15 @@ class _Env:
         return self.queue_result
 
     def _lookup(self, task_id):
-        return self.queue_statuses.get(task_id, (QueueStatus.DOWNLOADING, None))
+        if task_id in self.queue_statuses:
+            return self.queue_statuses[task_id]
+        for payload, user_id, _username in self.queued:
+            if payload["source_id"] == task_id:
+                kwargs = self.queued_kwargs[self.queued.index((payload, user_id, _username))]
+                return QueueStatus.DOWNLOADING, SimpleNamespace(
+                    wanted_id=kwargs.get("wanted_id"), task_id=task_id, user_id=user_id
+                )
+        return None, None
 
     def _search(self, source, book, **kwargs):
         del book, kwargs
@@ -80,14 +88,20 @@ class _Env:
     def item(self, wanted_id):
         return self.service.get_item(wanted_id)
 
-    def finish(self, wanted_id, status, message=None):
+    def finish(self, wanted_id, status, message=None, **fields):
         item = self.item(wanted_id)
+        payload, user_id, _username = self.queued[-1]
         task = SimpleNamespace(
             wanted_id=wanted_id,
             task_id=item["current_task_id"],
-            source=self.queued[-1][0]["source"],
+            source=payload["source"],
+            user_id=user_id,
             status_message=message,
+            last_error_type="StatusCallbackError" if status == QueueStatus.ERROR else None,
+            staged_path=None,
         )
+        for key, value in fields.items():
+            setattr(task, key, value)
         self.scheduler.on_task_terminal(item["current_task_id"], status, task)
 
 
@@ -405,9 +419,14 @@ def test_another_target_gets_its_own_delivery_task_from_a_copy(env, two_targets,
 
     delivery, user_id, username = env.queued[-1]
     assert (user_id, username) == (env.bob["id"], "bob")
-    assert delivery["source_id"] == f"aa-1#wanted-{wanted_id}-1"
+    assert delivery["source_id"] == f"aa-1~wanted-{wanted_id}-1"
+    assert env.queued_kwargs[-1]["wanted_id"] == wanted_id
     assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
-    assert "wanted_id" not in env.queued_kwargs[-1]
+    # Bob counts as delivered only once his delivery task completes.
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+    extra = SimpleNamespace(wanted_id=wanted_id, task_id=delivery["source_id"], status_message=None)
+    env.scheduler.on_task_terminal(delivery["source_id"], QueueStatus.COMPLETE, extra)
+
     subscribers = env.service.list_subscribers(wanted_id)
     assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", delivery["source_id"]]
     assert env.item(wanted_id)["state"] == STATE_OBTAINED
@@ -516,27 +535,49 @@ def test_changes_are_reported_to_listeners(env):
     assert wanted_id in env.changed
 
 
-def test_a_local_failure_is_no_strike_and_waits(env):
+def test_a_local_failure_is_no_strike_and_backs_off(env):
     wanted_id = env.add()
     env.scheduler.tick()
-    item = env.item(wanted_id)
-    task = SimpleNamespace(
-        wanted_id=wanted_id,
-        task_id=item["current_task_id"],
-        source="direct_download",
-        status_message="Destination misconfigured",
-        last_error_type="PermissionError",
-        staged_path=None,
-    )
     with patch("shelfmark.core.notifications.notify_admin") as notify_admin:
-        env.scheduler.on_task_terminal(task.task_id, QueueStatus.ERROR, task)
+        env.finish(
+            wanted_id,
+            QueueStatus.ERROR,
+            "Destination not writable: /books (Permission denied)",
+            staged_path="/tmp/shelfmark/Dune.epub",
+        )
 
     item = env.item(wanted_id)
     assert item["state"] == STATE_WAITING
-    assert item["backoff_level"] == 0
+    assert item["backoff_level"] == 1
     assert "could not be delivered" in item["last_result"]
     assert env.service.list_attempts(wanted_id)[0]["status"] == "cancelled"
     notify_admin.assert_called_once()
+
+
+def test_a_release_without_a_usable_book_is_a_strike_and_moves_on(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    env.finish(
+        wanted_id,
+        QueueStatus.ERROR,
+        "No supported file formats found",
+        staged_path="/tmp/shelfmark/Dune.zip",
+    )
+    env.scheduler.tick()
+
+    assert [payload["source_id"] for payload, _, _ in env.queued] == ["aa-1", "libgen:1"]
+    assert env.service.list_attempts(wanted_id)[-1]["status"] == "error"
+
+
+def test_a_worker_exception_counts_as_local(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    with patch("shelfmark.core.notifications.notify_admin"):
+        env.finish(
+            wanted_id, QueueStatus.ERROR, "Download failed: KeyError", last_error_type="KeyError"
+        )
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
 
 
 def test_a_lost_task_is_reconciled(env):
@@ -570,7 +611,7 @@ def test_a_missed_terminal_event_is_reconciled(env):
 def test_queue_failure_after_the_task_was_added_still_counts(env):
     env.queue_result = (False, "broadcast failed")
     wanted_id = env.add()
-    env.queue_statuses["aa-1"] = (QueueStatus.QUEUED, None)
+    env.queue_statuses["aa-1"] = (QueueStatus.QUEUED, SimpleNamespace(wanted_id=wanted_id))
 
     env.scheduler.tick()
 
@@ -612,3 +653,86 @@ def test_all_languages_are_searched_explicitly(env):
         env.scheduler.tick()
 
     assert seen and all(languages == ["all"] for languages in seen)
+
+
+def test_a_release_queued_by_someone_else_is_not_taken_over(env):
+    env.queue_result = (False, "Release is already in the download queue")
+    env.queue_statuses = {
+        "aa-1": (QueueStatus.DOWNLOADING, SimpleNamespace(wanted_id=None)),
+        "aa-2": (None, None),
+        "libgen:1": (None, None),
+    }
+    wanted_id = env.add()
+
+    env.scheduler.tick()
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert {attempt["status"] for attempt in env.service.list_attempts(wanted_id)} == {"cancelled"}
+
+
+def test_a_failed_extra_delivery_keeps_its_subscriber_waiting(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    task = _downloaded(env, wanted_id, tmp_path)
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+
+    extra_id = env.queued[-1][0]["source_id"]
+    extra = SimpleNamespace(
+        wanted_id=wanted_id, task_id=extra_id, status_message="Email send failed"
+    )
+    env.scheduler.on_task_terminal(extra_id, QueueStatus.ERROR, extra)
+
+    item = env.item(wanted_id)
+    assert item["state"] == STATE_WAITING
+    pending = [
+        sub["user_id"] for sub in env.service.list_subscribers(wanted_id) if not sub["delivered_at"]
+    ]
+    assert pending == [env.bob["id"]]
+    assert not any((tmp_path / "held").rglob("Dune.epub"))
+
+
+def test_an_extra_delivery_that_vanishes_is_reconciled(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    task = _downloaded(env, wanted_id, tmp_path)
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+    env.queue_statuses[env.queued[-1][0]["source_id"]] = (None, None)
+
+    env.scheduler._reconcile_downloads()
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+
+
+def test_no_copy_when_the_owner_no_longer_waits(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    env.service.remove_subscriber(wanted_id, env.alice["id"])
+
+    task = _downloaded(env, wanted_id, tmp_path)
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+
+    # Bob's target is "extra" now: he gets his own delivery task from a copy.
+    assert env.queued[-1][1] == env.bob["id"]
+    assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
+
+
+def test_a_user_template_makes_every_user_a_target(env):
+    with (
+        patch.object(
+            ws.config,
+            "get",
+            side_effect=lambda key, default=None, user_id=None: {
+                "BOOKS_OUTPUT_MODE": "folder",
+                "TEMPLATE_ORGANIZE": "{User}/{Author}/{Title}",
+            }.get(key, default),
+        ),
+        patch("shelfmark.core.utils.get_destination", return_value="/books"),
+    ):
+        assert ws.delivery_target(1, "alice") != ws.delivery_target(2, "bob")

@@ -247,3 +247,29 @@ def test_unknown_language_placeholder_passes():
 def test_match_key_only_for_sources_with_unstable_ids():
     assert release_match_key(_release(source="direct_download")) is None
     assert release_match_key(_release(source="prowlarr", format="epub")) is not None
+
+
+@pytest.mark.parametrize(
+    ("book", "title"),
+    [
+        ({"title": "Der Schwarm", "author": "Frank Schätzing"}, "Frank Schätzing - Der Schwarm"),
+        ({"title": "Der Schwarm", "author": "Frank Schatzing"}, "Frank Schätzing - Der Schwarm"),
+        ({"title": "Solaris", "author": "Stanisław Lem"}, "Stanisław Lem - Solaris"),
+        ({"title": "The Snowman", "author": "Jo Nesbø"}, "Jo Nesbø - The Snowman"),
+        (
+            {"title": "Harry Potter and the Philosopher's Stone"},
+            "Harry.Potter.and.the.Philosophers.Stone",
+        ),
+        (
+            {"title": "The Governance of China", "author": "Xi Jinping"},
+            "Xi Jinping - The Governance of China",
+        ),
+    ],
+)
+def test_names_the_book_handles_accents_apostrophes_and_author_words(book, title):
+    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+
+
+def test_roman_volume_numbers_count_as_numbers():
+    book = {"title": "Saga, Vol. I", "provider": "x", "provider_id": "1", "series_position": 1}
+    assert not names_the_book(_release("Saga, Vol. II"), book)

@@ -301,6 +301,9 @@ def queue_release(
         output_mode = "folder" if is_audiobook else books_output_mode
         output_args: dict[str, Any] = {}
         retry_resolution_fields = _build_retry_resolution_fields(release_data)
+        if staged_path:
+            # Only the staged copy can be delivered; its id is not one a source knows.
+            retry_resolution_fields["can_retry_without_staged_source"] = False
 
         if output_mode == "email" and not is_audiobook:
             email_to, email_error = _resolve_email_destination(user_id=user_id)

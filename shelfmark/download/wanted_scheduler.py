@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import threading
 import time
@@ -76,9 +77,15 @@ _SOURCE_SETTINGS_TABS = (
     "irc",
     "users",
 )
-# The task kinds a failure can be blamed on the release for; anything else (a broken
-# destination, post-processing, a disabled source) is local and says nothing about it.
-_RELEASE_FAILURE_TYPES = frozenset({None, "StatusCallbackError"})
+# Failure kinds that may be the release's fault. Anything else (a worker exception, a
+# disabled source) happened on our side and says nothing about the release.
+_RELEASE_FAILURE_TYPES = frozenset({None, "StatusCallbackError", "UnknownFailure"})
+# Messages of failures that come from our own destination or output settings.
+_LOCAL_FAILURE_PATTERN = re.compile(
+    r"destination|not writable|permission|custom script|smtp|email|booklore|no space|"
+    r"disk full|cannot create",
+    re.IGNORECASE,
+)
 # A user's own search makes background searches wait, but never longer than this.
 _MAX_YIELD_SECONDS = 30 * 60
 
@@ -100,6 +107,9 @@ def _positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+_USER_TEMPLATE_KEYS = ("TEMPLATE_RENAME", "TEMPLATE_ORGANIZE")
+
+
 def _held_copies_dir() -> Path:
     return TMP_DIR / "wanted"
 
@@ -117,7 +127,12 @@ def delivery_target(user_id: int | None, username: str | None) -> str:
         library = config.get("BOOKLORE_LIBRARY_ID", "", user_id=user_id)
         path = config.get("BOOKLORE_PATH_ID", "", user_id=user_id)
         return f"booklore:{library}:{path}"
-    return f"folder:{get_destination(is_audiobook=False, user_id=user_id, username=username)}"
+    folder = f"folder:{get_destination(is_audiobook=False, user_id=user_id, username=username)}"
+    templates = (config.get(key, "", user_id=user_id) for key in _USER_TEMPLATE_KEYS)
+    if any(isinstance(template, str) and "{user}" in template.lower() for template in templates):
+        # File names carry the user, so each user is a target of their own.
+        return f"{folder}|user:{username or user_id}"
+    return folder
 
 
 def _copy_path(source: Path, target_dir: Path) -> Path:
@@ -195,6 +210,11 @@ class WantedScheduler:
         self._delivery_lock = threading.Lock()
         self._payloads: dict[str, dict[str, Any]] = {}
         self._held: dict[str, list[tuple[list[dict[str, Any]], Path]]] = {}
+        # Extra delivery task id -> (wanted id, subscriber ids it delivers to, its copy).
+        self._extras: dict[str, tuple[int, list[int | None], Path]] = {}
+        # The terminal hook (worker / request threads) and reconciliation (this thread)
+        # may see the same ending; only one may act on it.
+        self._terminal_lock = threading.RLock()
 
     # -- lifecycle -------------------------------------------------------------------
 
@@ -288,9 +308,12 @@ class WantedScheduler:
         for item in self._service.items_in_state(STATE_DOWNLOADING):
             task_id = item.get("current_task_id")
             if not task_id:
+                self._reconcile_extras(item["id"])
+                if not self._deliveries_in_flight(item["id"]):
+                    self._settle_deliveries(item)
                 continue
             status, task = self._task_lookup(task_id)
-            if status is None:
+            if status is None or getattr(task, "wanted_id", None) != item["id"]:
                 logger.warning("Wanted: task %s of %s vanished; moving on", task_id, item["title"])
                 self._service.finish_attempt(item["id"], task_id, ATTEMPT_CANCELLED, "Task lost")
                 self._service.update_item(
@@ -299,8 +322,24 @@ class WantedScheduler:
                     state=STATE_SEARCHING,
                     current_task_id=None,
                 )
-            elif status in TERMINAL_QUEUE_STATUSES and task is not None:
+                self._forget_task(task_id)
+            elif status in TERMINAL_QUEUE_STATUSES:
                 self.on_task_terminal(task_id, status, task)
+
+    def _reconcile_extras(self, wanted_id: int) -> None:
+        if self._task_lookup is None:
+            return
+        with self._delivery_lock:
+            extra_ids = [tid for tid, extra in self._extras.items() if extra[0] == wanted_id]
+        for extra_id in extra_ids:
+            status, task = self._task_lookup(extra_id)
+            if status is None:
+                with self._delivery_lock:
+                    extra = self._extras.pop(extra_id, None)
+                if extra is not None:
+                    _remove_path(extra[2].parent)
+            elif status in TERMINAL_QUEUE_STATUSES:
+                self.on_task_terminal(extra_id, status, task)
 
     def _continue_cycles(self) -> None:
         """Queue the next candidate for items whose last attempt has ended."""
@@ -605,9 +644,14 @@ class WantedScheduler:
             wanted_id=wanted_id,
         )
         if not success and self._task_lookup is not None:
-            status, _task = self._task_lookup(release.source_id)
-            # Queued after all (e.g. only the status broadcast failed); it is ours.
-            success = status is not None and status not in TERMINAL_QUEUE_STATUSES
+            status, queued_task = self._task_lookup(release.source_id)
+            # Queued after all (e.g. only the status broadcast failed) - if it is ours, not
+            # the same release queued by a user or another item.
+            success = (
+                status is not None
+                and status not in TERMINAL_QUEUE_STATUSES
+                and getattr(queued_task, "wanted_id", None) == wanted_id
+            )
         if success:
             logger.info(
                 "Wanted: queued %s from %s for %s", release.title, release.source, item["title"]
@@ -697,6 +741,17 @@ class WantedScheduler:
         wanted_id = _positive_int(getattr(task, "wanted_id", None))
         if wanted_id is None:
             return
+        with self._terminal_lock:
+            self._on_task_terminal(wanted_id, task_id, status, task)
+
+    def _on_task_terminal(
+        self, wanted_id: int, task_id: str, status: QueueStatus, task: Any
+    ) -> None:
+        with self._delivery_lock:
+            extra = self._extras.pop(task_id, None)
+        if extra is not None:
+            self._extra_delivery_ended(extra, task_id, status)
+            return
         item = self._service.get_item(wanted_id)
         if item is None:
             self._cycles.pop(wanted_id, None)
@@ -723,13 +778,14 @@ class WantedScheduler:
             # Cancelling a wanted download rejects that release, e.g. the wrong book.
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_REJECTED, message)
             self._next_attempt(wanted_id, "Last release was cancelled")
-        elif self._failure_is_local(task):
+        elif self._failure_is_local(task, message):
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_CANCELLED, message)
             self._notify_local_failure(item, message)
+            # Waits like a book that was not found, so a lasting fault backs off.
             self._end_cycle(
                 {**item, "state": STATE_DOWNLOADING},
-                found_nothing=False,
-                source_errors=True,
+                found_nothing=True,
+                source_errors=False,
                 result=f"Download could not be delivered: {message or 'unknown error'}",
             )
         else:
@@ -751,11 +807,15 @@ class WantedScheduler:
         self.wake()
 
     @staticmethod
-    def _failure_is_local(task: Any) -> bool:
-        """Whether a failure happened on our side rather than with the release."""
-        if getattr(task, "staged_path", None):
+    def _failure_is_local(task: Any, message: str | None) -> bool:
+        """Whether a failure happened on our side rather than with the release.
+
+        A release that downloads but holds no usable book still fails in post-processing;
+        only failures naming our destination or output count as local.
+        """
+        if getattr(task, "last_error_type", None) not in _RELEASE_FAILURE_TYPES:
             return True
-        return getattr(task, "last_error_type", None) not in _RELEASE_FAILURE_TYPES
+        return bool(message and _LOCAL_FAILURE_PATTERN.search(message))
 
     def _notify_local_failure(self, item: dict[str, Any], message: str | None) -> None:
         from shelfmark.core.notifications import (
@@ -780,11 +840,13 @@ class WantedScheduler:
 
     # -- delivery ------------------------------------------------------------------
 
-    def _delivery_groups(self, wanted_id: int, task: Any) -> list[list[dict[str, Any]]]:
+    def _delivery_groups(
+        self, wanted_id: int, task: Any
+    ) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
         """Pending subscribers allowed this download, grouped by delivery target.
 
-        The group of the user the download runs for comes first; the download itself
-        delivers to it.
+        Returns the group the download itself delivers to (the one holding the user it
+        runs for; empty if that user is no longer waiting) and every other group.
         """
         source = str(getattr(task, "source", "") or "")
         receivers = self._users_allowed(self._pending_subscribers(wanted_id), source)
@@ -793,10 +855,14 @@ class WantedScheduler:
             target = delivery_target(_positive_int(sub.get("user_id")), sub.get("username"))
             groups.setdefault(target, []).append(sub)
         owner_id = getattr(task, "user_id", None)
-        return sorted(
-            groups.values(),
-            key=lambda group: not any(sub.get("user_id") == owner_id for sub in group),
-        )
+        owner_group: list[dict[str, Any]] = []
+        others: list[list[dict[str, Any]]] = []
+        for group in groups.values():
+            if not owner_group and any(sub.get("user_id") == owner_id for sub in group):
+                owner_group = group
+            else:
+                others.append(group)
+        return owner_group, others
 
     def on_downloaded_file(self, task: Any, path: Path) -> None:
         """Hold a copy of a wanted download for every other delivery target."""
@@ -807,20 +873,32 @@ class WantedScheduler:
         item = self._service.get_item(wanted_id)
         if item is None or item.get("current_task_id") != task_id:
             return
-        extra_groups = self._delivery_groups(wanted_id, task)[1:]
+        _owner_group, extra_groups = self._delivery_groups(wanted_id, task)
         if not extra_groups:
             return
         digest = hashlib.sha256(task_id.encode()).hexdigest()[:16]
         held: list[tuple[list[dict[str, Any]], Path]] = []
-        for index, group in enumerate(extra_groups, start=1):
-            copy = _copy_path(path, _held_copies_dir() / f"{digest}-{index}")
-            held.append((group, copy))
+        try:
+            for index, group in enumerate(extra_groups, start=1):
+                target_dir = _held_copies_dir() / f"{digest}-{index}"
+                held.append((group, target_dir / path.name))
+                _copy_path(path, target_dir)
+        except OSError:
+            for _group, copy in held:
+                _remove_path(copy.parent)
+            raise
         with self._delivery_lock:
-            previous = self._held.pop(task_id, [])
-            self._held[task_id] = held
+            # The download may have been cancelled while we copied.
+            active = task_id in self._payloads
+            previous = self._held.pop(task_id, []) if active else held
+            if active:
+                self._held[task_id] = held
         for _group, copy in previous:
             _remove_path(copy.parent)
-        logger.info("Wanted: holding %d extra delivery copy(ies) of %s", len(held), item["title"])
+        if active:
+            logger.info(
+                "Wanted: holding %d extra delivery copy(ies) of %s", len(held), item["title"]
+            )
 
     def _forget_task(self, task_id: str) -> None:
         with self._delivery_lock:
@@ -838,29 +916,37 @@ class WantedScheduler:
         copy: Path,
         payload: dict[str, Any],
     ) -> bool:
-        delivery_payload = {**payload, "source_id": f"{task_id}#wanted-{wanted_id}-{index}"}
+        # No "#": the id ends up in cover URLs, where it would start a fragment.
+        extra_id = f"{task_id}~wanted-{wanted_id}-{index}"
+        user_ids = [sub.get("user_id") for sub in group]
+        with self._delivery_lock:
+            self._extras[extra_id] = (wanted_id, user_ids, copy)
         owner = group[0]
         success, error = self._queue_release(
-            delivery_payload,
+            {**payload, "source_id": extra_id},
             0,
             user_id=_positive_int(owner.get("user_id")),
             username=owner.get("username"),
+            wanted_id=wanted_id,
             staged_path=str(copy),
         )
         if not success:
             logger.warning("Wanted: could not queue a delivery of %s: %s", task_id, error)
+            with self._delivery_lock:
+                self._extras.pop(extra_id, None)
             return False
-        self._service.mark_delivered(
-            wanted_id, [sub.get("user_id") for sub in group], delivery_payload["source_id"]
-        )
         return True
+
+    def _deliveries_in_flight(self, wanted_id: int) -> int:
+        with self._delivery_lock:
+            return sum(1 for extra in self._extras.values() if extra[0] == wanted_id)
 
     def _deliver(self, item: dict[str, Any], task: Any) -> None:
         wanted_id = item["id"]
         task_id = str(getattr(task, "task_id", "") or "")
-        groups = self._delivery_groups(wanted_id, task)
-        if groups:
-            owner_group_ids = [sub.get("user_id") for sub in groups[0]]
+        owner_group, _others = self._delivery_groups(wanted_id, task)
+        if owner_group:
+            owner_group_ids = [sub.get("user_id") for sub in owner_group]
             self._service.mark_delivered(wanted_id, owner_group_ids, task_id)
             self._notify_obtained(item, owner_group_ids, reason="downloaded")
         with self._delivery_lock:
@@ -872,9 +958,37 @@ class WantedScheduler:
             ):
                 _remove_path(copy.parent)
         self._cycles.pop(wanted_id, None)
+        self._settle_deliveries(item)
+
+    def _extra_delivery_ended(
+        self, extra: tuple[int, list[int | None], Path], task_id: str, status: QueueStatus
+    ) -> None:
+        wanted_id, user_ids, copy = extra
+        item = self._service.get_item(wanted_id)
+        if status == QueueStatus.COMPLETE and item is not None:
+            self._service.mark_delivered(wanted_id, user_ids, task_id)
+            self._notify_obtained(item, user_ids, reason="downloaded")
+        else:
+            # A failed delivery keeps its copy for a manual retry; ours is no use now.
+            _remove_path(copy.parent)
+        if item is not None:
+            self._settle_deliveries(item)
+
+    def _settle_deliveries(self, item: dict[str, Any]) -> None:
+        """Decide an item's state once its download finished delivering."""
+        wanted_id = item["id"]
+        if self._deliveries_in_flight(wanted_id):
+            self._service.update_item(
+                wanted_id,
+                state=STATE_DOWNLOADING,
+                current_task_id=None,
+                last_result="Delivering to the other subscribers",
+            )
+            self._changed(wanted_id)
+            return
         if self._pending_subscribers(wanted_id):
-            # Someone may not download from this source, or had no copy to receive;
-            # keep looking for them.
+            # Someone may not download from this source, had no copy to receive, or their
+            # delivery failed; keep looking for them.
             self._service.update_item(
                 wanted_id,
                 state=STATE_WAITING,

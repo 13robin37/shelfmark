@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from shelfmark.core.logger import setup_logger
@@ -29,8 +30,10 @@ ATTEMPT_CANCELLED = "cancelled"
 # A user cancelled this release's download: never offer it again for this item.
 ATTEMPT_REJECTED = "rejected"
 
-# A release that failed in this many separate search cycles is never tried again.
+# A release that failed in this many separate search cycles is not tried again - until
+# its failures are this old, since an outage can look like a bad release.
 BLOCK_AFTER_FAILED_CYCLES = 2
+BLOCK_EXPIRY_DAYS = 30
 
 MAX_BOOK_DATA_BYTES = 10 * 1024
 
@@ -651,19 +654,22 @@ class WantedService:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT cycle, source, source_id, match_key, status FROM wanted_attempts "
-                "WHERE wanted_id = ?",
+                "SELECT cycle, source, source_id, match_key, status, finished_at "
+                "FROM wanted_attempts WHERE wanted_id = ?",
                 (wanted_id,),
             ).fetchall()
         finally:
             conn.close()
+        expiry = (datetime.now(UTC) - timedelta(days=BLOCK_EXPIRY_DAYS)).isoformat(
+            timespec="seconds"
+        )
         failed_cycles: dict[str, set[int]] = {}
         excluded: set[str] = set()
         for row in rows:
             keys = release_attempt_keys(row["source"], row["source_id"], row["match_key"])
             if row["cycle"] == cycle or row["status"] == ATTEMPT_REJECTED:
                 excluded |= keys
-            if row["status"] == ATTEMPT_ERROR:
+            if row["status"] == ATTEMPT_ERROR and (row["finished_at"] or "") >= expiry:
                 for key in keys:
                     failed_cycles.setdefault(key, set()).add(int(row["cycle"]))
         excluded |= {

@@ -1,7 +1,19 @@
 # Konzept: Merkliste mit automatischem Download („Wanted“)
 
-Status: Konzept, noch kein Code, Entscheidungen aus Abschnitt 11 eingearbeitet ·
-Branch `docs/wanted-list-concept` (Basis `main` @ 9321096)
+Status: umgesetzt auf Branch `feat/wanted-list` (Nutzer-Doku: `docs/wanted-list.md`).
+Abweichungen der Umsetzung vom ursprünglichen Konzept, aus den Gegenproben:
+
+- Bricht ein Nutzer einen Merklisten-Download ab, wird dieses Release dauerhaft verworfen und
+  das nächste probiert; der Eintrag wird nicht pausiert (Pausieren bleibt Admins vorbehalten).
+- Gesperrte Releases (zwei Fehlschläge in getrennten Durchgängen) werden nach 30 Tagen wieder
+  zugelassen, damit ein Ausfall einer Quelle nicht dauerhaft alles sperrt.
+- Fehler auf unserer Seite (Ziel nicht beschreibbar, E-Mail/BookLore, Worker-Ausnahmen) sind
+  kein Strike; der Admin wird benachrichtigt, der Eintrag wartet mit normalem Backoff.
+  Ein Release ohne verwertbare Buchdatei zählt dagegen als Fehlschlag des Releases.
+- Weitere Zustellziele gelten erst als beliefert, wenn ihr eigener Zustell-Task fertig ist;
+  ein Nutzer mit `{User}` im Benennungs-Template ist immer ein eigenes Ziel.
+- `wanted_id` und `staged_path` sind Parameter von `queue_release`, nie Teil der Release-Daten
+  (sonst könnte ein Client eine beliebige Serverdatei zustellen lassen).
 
 ## 1. Ziel
 
