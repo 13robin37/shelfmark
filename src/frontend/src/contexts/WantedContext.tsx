@@ -6,7 +6,9 @@ import {
   addWanted,
   clearObtainedWanted,
   clearWantedBlocklist,
+  evaluateWantedReleases,
   getWantedAttempts,
+  grabWantedRelease,
   getWantedStatus,
   listWanted,
   pauseWanted,
@@ -20,6 +22,7 @@ import type {
   Book,
   ContentType,
   Language,
+  Release,
   WantedAttempt,
   WantedBookState,
   WantedItem,
@@ -55,6 +58,13 @@ interface WantedContextValue {
   clearObtained: () => Promise<void>;
   loadAttempts: (item: WantedItem) => Promise<WantedAttempt[]>;
   unblockRelease: (item: WantedItem, attempt: WantedAttempt) => Promise<void>;
+  /** Why the wanted list would skip each release ("source:id" -> reason or null). */
+  evaluateReleases: (
+    wantedId: number,
+    releases: Release[],
+  ) => Promise<Record<string, string | null>>;
+  /** Download a picked release for the wanted list; false if it could not be queued. */
+  grab: (wantedId: number, release: Release, title: string) => Promise<boolean>;
   refresh: () => Promise<void>;
 }
 
@@ -79,6 +89,8 @@ const DISABLED_VALUE: WantedContextValue = {
   clearObtained: async () => undefined,
   loadAttempts: async () => [],
   unblockRelease: async () => undefined,
+  evaluateReleases: async () => ({}),
+  grab: async () => false,
   refresh: async () => undefined,
 };
 
@@ -260,6 +272,15 @@ export function WantedProvider({
           () => unblockWantedRelease(item.id, attempt.id),
           `"${attempt.release_title ?? 'Release'}" may be tried again`,
         ),
+      evaluateReleases: (wantedId, releases) => evaluateWantedReleases(wantedId, releases),
+      grab: async (wantedId, release, title) => {
+        let queued = false;
+        await run(async () => {
+          await grabWantedRelease(wantedId, release);
+          queued = true;
+        }, `Downloading "${title}" for the wanted list`);
+        return queued;
+      },
       refresh,
     }),
     [

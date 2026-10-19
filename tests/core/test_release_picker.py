@@ -306,3 +306,19 @@ def test_release_author_is_compared_without_accents():
         "provider_id": "1",
     }
     assert names_the_book(_release("Der Schwarm", extra={"author": "Frank Schätzing"}), book)
+
+
+def test_rejection_reasons_say_why_a_release_is_skipped():
+    from shelfmark.core.release_picker import PickerPreferences, rejection_reason
+
+    prefs = PickerPreferences(supported_formats=frozenset({"epub"}))
+    assert rejection_reason(_release("Dune"), BOOK, prefs) is None
+    assert rejection_reason(_release("Dune", format="pdf"), BOOK, prefs) == (
+        "PDF is not a wanted format"
+    )
+    assert rejection_reason(_release("Dune Messiah"), BOOK, prefs).startswith("Names another work")
+    assert rejection_reason(_release("Dune Book 2"), BOOK, prefs) == "Another volume or part"
+    blocked = {"id:direct_download:Dune"}
+    assert rejection_reason(_release("Dune"), BOOK, prefs, blocked) == (
+        "Failed or was cancelled before"
+    )

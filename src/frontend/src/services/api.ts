@@ -4,6 +4,7 @@ import type {
   AppConfig,
   LoginCredentials,
   AuthResponse,
+  Release,
   ReleaseSource,
   ReleasesResponse,
   RequestPolicyResponse,
@@ -1099,6 +1100,7 @@ export interface WantedBookPayload {
   isbn_13?: string;
   isbn_10?: string;
   year?: string;
+  release_date?: string;
   preview?: string;
   series_name?: string;
   series_position?: number;
@@ -1135,6 +1137,24 @@ export const clearObtainedWanted = async (): Promise<void> => {
 export const getWantedAttempts = async (id: number): Promise<WantedAttempt[]> => {
   const response = await fetchJSON<{ attempts: WantedAttempt[] }>(wantedItemUrl(id, 'attempts'));
   return response.attempts;
+};
+
+export const evaluateWantedReleases = async (
+  id: number,
+  releases: Release[],
+): Promise<Record<string, string | null>> => {
+  const response = await fetchJSON<{ reasons: Record<string, string | null> }>(
+    wantedItemUrl(id, 'evaluate'),
+    { method: 'POST', body: JSON.stringify({ releases }) },
+  );
+  return response.reasons;
+};
+
+export const grabWantedRelease = async (id: number, release: Release): Promise<void> => {
+  await fetchJSON<unknown>(wantedItemUrl(id, 'grab'), {
+    method: 'POST',
+    body: JSON.stringify({ release }),
+  });
 };
 
 export const unblockWantedRelease = async (id: number, attemptId: number): Promise<void> => {

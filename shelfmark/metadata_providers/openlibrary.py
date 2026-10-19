@@ -29,6 +29,7 @@ from shelfmark.metadata_providers import (
     SearchType,
     SortOrder,
     TextSearchField,
+    parse_release_date,
     register_provider,
 )
 
@@ -492,6 +493,7 @@ class OpenLibraryProvider(MetadataProvider):
                 cover_url=cover_url,
                 publisher=publisher,
                 publish_year=publish_year,
+                release_date=parse_release_date(publish_date),
                 source_url=f"{OPENLIBRARY_BASE_URL}{key}" if key else None,
             )
 

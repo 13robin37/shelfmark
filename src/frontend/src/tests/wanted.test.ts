@@ -45,6 +45,7 @@ const item = (overrides: Partial<WantedItem> = {}): WantedItem => ({
   subscriber_count: 1,
   subscribed: true,
   languages: null,
+  release_date: null,
   ...overrides,
 });
 
@@ -232,5 +233,23 @@ describe('describeAttemptBlock', () => {
     expect(
       describeAttemptBlock(attempt({ blocked: true, blocked_until: '2026-11-12T00:00:00+00:00' })),
     ).toMatch(/^Blocked until /);
+  });
+});
+
+describe('unreleased books', () => {
+  it('says when a bookmarked book comes out', () => {
+    const now = Date.parse('2026-10-19T12:00:00Z');
+    expect(describeWantedItem(item({ release_date: '2027-03-12' }), now)).toMatch(
+      /^Releases .*2027; searching starts a day before$/,
+    );
+    expect(describeWantedItem(item({ release_date: '2020-01-01' }), now)).toBe(
+      'Waiting for the first search',
+    );
+  });
+
+  it('passes the release date on when bookmarking', () => {
+    expect(buildWantedBookPayload({ ...book, release_date: '2027-03-12' })?.release_date).toBe(
+      '2027-03-12',
+    );
   });
 });

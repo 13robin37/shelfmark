@@ -661,6 +661,7 @@ if wanted_service is not None:
         wanted_service,
         resolve_auth_mode=_resolve_auth_mode_for_routes,
         on_change=_on_wanted_route_change,
+        scheduler=wanted_scheduler,
     )
     try:
         _reset_wanted = wanted_service.reset_interrupted()

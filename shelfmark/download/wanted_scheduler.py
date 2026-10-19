@@ -23,7 +23,12 @@ from shelfmark.config.env import TMP_DIR
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import TERMINAL_QUEUE_STATUSES, QueueStatus
-from shelfmark.core.release_picker import PickerPreferences, pick_releases, release_match_key
+from shelfmark.core.release_picker import (
+    PickerPreferences,
+    pick_releases,
+    rejection_reason,
+    release_match_key,
+)
 from shelfmark.core.request_helpers import now_utc_iso
 from shelfmark.core.utils import ARCHIVE_FORMATS
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
@@ -122,6 +127,57 @@ def _parse_time(value: object) -> datetime | None:
         return None
     # SQLite's CURRENT_TIMESTAMP is UTC without an offset.
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _search_starts(book_data: dict[str, Any], book: BookMetadata | None = None) -> datetime | None:
+    """When searching may start for a book not released yet (a day early); None if it may now."""
+    released: datetime | None = None
+    date = (book.release_date if book is not None else None) or book_data.get("release_date")
+    if isinstance(date, str):
+        try:
+            released = datetime.fromisoformat(date).replace(tzinfo=UTC)
+        except ValueError:
+            released = None
+    if released is None:
+        raw_year = str(book_data.get("year") or "").strip()[:4]
+        year = _positive_int(book.publish_year if book is not None else None) or (
+            int(raw_year) if raw_year.isdigit() else None
+        )
+        if year is not None and year > datetime.now(UTC).year:
+            released = datetime(year, 1, 1, tzinfo=UTC)
+    if released is None:
+        return None
+    start = released - timedelta(days=1)
+    return start if start > datetime.now(UTC) else None
+
+
+def release_from_dict(data: object) -> Release | None:
+    """A release as the frontend holds it (an /api/releases entry), or None if malformed."""
+    from dataclasses import fields
+
+    from shelfmark.release_sources import Release
+
+    if not isinstance(data, dict):
+        return None
+    if not all(isinstance(data.get(key), str) and data[key] for key in ("source", "source_id")):
+        return None
+    if not isinstance(data.get("title"), str):
+        return None
+    known = {item.name for item in fields(Release)}
+    values = {key: value for key, value in data.items() if key in known}
+    for key in ("size_bytes", "seeders"):
+        value = values.get(key)
+        values[key] = value if isinstance(value, int) and not isinstance(value, bool) else None
+    for key in ("format", "language", "size", "download_url", "info_url", "indexer", "peers"):
+        if not isinstance(values.get(key), str):
+            values[key] = None
+    if not isinstance(values.get("extra"), dict):
+        values["extra"] = {}
+    content_type = values.get("content_type")
+    values["content_type"] = content_type if isinstance(content_type, str) else None
+    protocol = values.get("protocol")
+    values["protocol"] = protocol if isinstance(protocol, str) and protocol else None
+    return Release(**values)
 
 
 def _release_format(release: Release) -> str:
@@ -553,6 +609,10 @@ class WantedScheduler:
         item = self._service.get_item(wanted_id)
         if item is None or item["state"] != STATE_WAITING:
             return
+        starts = _search_starts(item["book_data"])
+        if starts is not None:
+            self._wait_for_release(wanted_id, starts, STATE_WAITING)
+            return
         cycle_number = int(item["search_count"]) + 1
         item = self._service.update_item(
             wanted_id,
@@ -571,6 +631,13 @@ class WantedScheduler:
             return
 
         book = self._resolve_book(item["book_data"])
+        if book.release_date and book.release_date != item["book_data"].get("release_date"):
+            item["book_data"] = {**item["book_data"], "release_date": book.release_date}
+            self._service.update_item(wanted_id, book_data=item["book_data"])
+        starts = _search_starts(item["book_data"], book)
+        if starts is not None:
+            self._wait_for_release(wanted_id, starts, STATE_SEARCHING)
+            return
         if self._in_library(book):
             # Only those whose downloads go to a folder have it; email and BookLore
             # subscribers still want it delivered.
@@ -615,15 +682,8 @@ class WantedScheduler:
 
         self._searches.append(time.monotonic())
         releases, answered, failed = self._search(sources, book, pending)
-        formats = preferred_formats()[0]
-        prefs = PickerPreferences(
-            # Archives are unpacked to their books, so they are no format choice.
-            supported_formats=supported_formats() & {*formats, *ARCHIVE_FORMATS},
-            preferred_formats=formats,
-            excluded_formats=preferred_formats()[1],
-            source_order=tuple(sources),
-            languages=tuple(self._search_languages(pending) or ()),
-        )
+        prefs = self._preferences(pending, sources)
+        formats = prefs.preferred_formats
         picked = pick_releases(
             releases,
             self._picker_book(item["book_data"], book),
@@ -664,26 +724,50 @@ class WantedScheduler:
         )
         self._try_next(wanted_id)
 
+    def _wait_for_release(self, wanted_id: int, starts: datetime, expected_state: str) -> None:
+        self._cycles.pop(wanted_id, None)
+        waiting = self._service.update_item(
+            wanted_id,
+            expected_state=expected_state,
+            state=STATE_WAITING,
+            next_search_at=starts.isoformat(timespec="seconds"),
+            last_result="Not released yet",
+        )
+        if waiting is not None:
+            self._changed(wanted_id)
+
     @staticmethod
-    def _hold_for_format(
-        picked: list[Release], pending: list[dict[str, Any]], formats: tuple[str, ...]
-    ) -> tuple[list[Release], _FormatHold | None]:
-        """Drop releases below the good-enough format while subscribers still wait for it."""
+    def _format_hold(
+        pending: list[dict[str, Any]], formats: tuple[str, ...]
+    ) -> tuple[int, datetime] | None:
+        """(rank a format must reach, until when) while subscribers wait for a good format."""
         cutoff, days = format_wait()
-        if days <= 0 or not picked or not formats:
-            return picked, None
+        if days <= 0 or not formats:
+            return None
         joined = [_parse_time(sub.get("created_at")) for sub in pending]
         started = min((time for time in joined if time is not None), default=None)
         if started is None:
-            return picked, None
+            return None
         until = started + timedelta(days=days)
         if datetime.now(UTC) >= until:
-            return picked, None
+            return None
         rank = {fmt: index for index, fmt in enumerate(formats)}
-        limit = rank.get(cutoff, 0) if cutoff else 0
-        good = [
-            release for release in picked if rank.get(_release_format(release), limit + 1) <= limit
-        ]
+        return (rank.get(cutoff, 0) if cutoff else 0), until
+
+    @staticmethod
+    def _good_enough(release: Release, formats: tuple[str, ...], limit: int) -> bool:
+        rank = {fmt: index for index, fmt in enumerate(formats)}
+        return rank.get(_release_format(release), limit + 1) <= limit
+
+    def _hold_for_format(
+        self, picked: list[Release], pending: list[dict[str, Any]], formats: tuple[str, ...]
+    ) -> tuple[list[Release], _FormatHold | None]:
+        """Drop releases below the good-enough format while subscribers still wait for it."""
+        hold = self._format_hold(pending, formats) if picked else None
+        if hold is None:
+            return picked, None
+        limit, until = hold
+        good = [release for release in picked if self._good_enough(release, formats, limit)]
         if good:
             return good, None
         found = sorted({_release_format(release).upper() or "unknown format" for release in picked})
@@ -692,6 +776,74 @@ class WantedScheduler:
             f"until {until.date().isoformat()}"
         )
         return [], _FormatHold(until=until, message=message)
+
+    def _preferences(self, pending: list[dict[str, Any]], sources: list[str]) -> PickerPreferences:
+        formats = preferred_formats()[0]
+        return PickerPreferences(
+            # Archives are unpacked to their books, so they are no format choice.
+            supported_formats=supported_formats() & {*formats, *ARCHIVE_FORMATS},
+            preferred_formats=formats,
+            excluded_formats=preferred_formats()[1],
+            source_order=tuple(sources),
+            languages=tuple(self._search_languages(pending) or ()),
+        )
+
+    def evaluate(self, wanted_id: int, releases: list[Release]) -> dict[str, str | None]:
+        """Why the wanted list would skip each release ("source:id" -> reason or None)."""
+        item = self._service.get_item(wanted_id)
+        if item is None:
+            return {}
+        pending = self._pending_subscribers(wanted_id)
+        sources = [
+            source for source in self._available_sources() if self._users_allowed(pending, source)
+        ]
+        prefs = self._preferences(pending, sources)
+        blocked = self._service.blocked_release_keys(wanted_id)
+        hold = self._format_hold(pending, prefs.preferred_formats)
+        reasons: dict[str, str | None] = {}
+        for release in releases:
+            if release.source not in sources:
+                reason: str | None = "Source not used by the wanted list"
+            else:
+                reason = rejection_reason(release, item["book_data"], prefs, blocked)
+            if reason is None and hold is not None:
+                limit, until = hold
+                if not self._good_enough(release, prefs.preferred_formats, limit):
+                    wanted = prefs.preferred_formats[limit].upper()
+                    reason = f"Waiting for {wanted} until {until.date().isoformat()}"
+            reasons[f"{release.source}:{release.source_id}"] = reason
+        return reasons
+
+    def grab(
+        self, wanted_id: int, release: Release, owner: dict[str, Any]
+    ) -> tuple[bool, str | None]:
+        """Download a release a user picked for an item, as if the wanted list had found it."""
+        with self._terminal_lock:
+            item = self._service.get_item(wanted_id)
+            if item is None:
+                return False, "Wanted item not found"
+            if item["state"] != STATE_WAITING:
+                return False, f"The wanted list is {item['state']} for this book"
+            cycle_number = int(item["search_count"]) + 1
+            claimed = self._service.update_item(
+                wanted_id,
+                expected_state=STATE_WAITING,
+                state=STATE_SEARCHING,
+                search_count=cycle_number,
+            )
+            if claimed is None:
+                return False, "The wanted list is busy with this book"
+            cycle = _Cycle(number=cycle_number, started=time.monotonic())
+            self._cycles[wanted_id] = cycle
+            if self._queue_attempt(claimed, release, owner, cycle_number):
+                return True, None
+            # Back to where it was; the next scheduled search goes on as planned.
+            self._cycles.pop(wanted_id, None)
+            self._service.update_item(
+                wanted_id, expected_state=STATE_SEARCHING, state=STATE_WAITING
+            )
+            self._changed(wanted_id)
+            return False, cycle.queue_error or "Could not queue the release"
 
     def _in_library(self, book: BookMetadata) -> bool:
         from shelfmark.core import library_index

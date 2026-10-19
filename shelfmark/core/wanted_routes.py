@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
 
     from shelfmark.core.user_db import UserDB
+    from shelfmark.download.wanted_scheduler import WantedScheduler
 
 logger = setup_logger(__name__)
 
@@ -59,6 +60,7 @@ def serialize_item(
         "obtained_reason": item.get("obtained_reason"),
         "attempt_count": item.get("attempt_count", 0),
         "created_at": item.get("created_at"),
+        "release_date": book.get("release_date"),
         "subscriber_count": len(subscribers),
         "subscribed": own is not None,
         "languages": own.get("languages") if own else None,
@@ -84,6 +86,7 @@ def register_wanted_routes(
     *,
     resolve_auth_mode: Callable[[], str],
     on_change: Callable[[int | None], None] | None = None,
+    scheduler: WantedScheduler | None = None,
 ) -> None:
     """Register /api/wanted routes. ``on_change`` is told which item changed."""
 
@@ -239,6 +242,55 @@ def register_wanted_routes(
         cleared = wanted_service.clear_obtained(viewer_id, everyone=is_admin)
         _changed(None)
         return jsonify({"status": "cleared", "cleared": cleared})
+
+    def _subscribed(wanted_id: int, viewer_id: int | None) -> bool:
+        return any(
+            sub.get("user_id") == viewer_id for sub in wanted_service.list_subscribers(wanted_id)
+        )
+
+    @app.route("/api/wanted/<int:wanted_id>/evaluate", methods=["POST"])
+    def api_wanted_evaluate(wanted_id: int) -> ResponseReturnValue:
+        from shelfmark.download.wanted_scheduler import release_from_dict
+
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        if scheduler is None or _item_for_viewer(wanted_id, viewer_id, is_admin) is None:
+            return _error("Wanted item not found", 404)
+        payload = request.get_json(silent=True)
+        raw = payload.get("releases") if isinstance(payload, dict) else None
+        if not isinstance(raw, list):
+            return _error("Expected a JSON object with releases", 400)
+        releases = [release for entry in raw[:500] if (release := release_from_dict(entry))]
+        return jsonify({"reasons": scheduler.evaluate(wanted_id, releases)})
+
+    @app.route("/api/wanted/<int:wanted_id>/grab", methods=["POST"])
+    def api_wanted_grab(wanted_id: int) -> ResponseReturnValue:
+        from shelfmark.download.wanted_scheduler import release_from_dict
+
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        if not wanted_enabled():
+            return _error("The wanted list is disabled", 403, code="wanted_disabled")
+        if scheduler is None or not _subscribed(wanted_id, viewer_id):
+            return _error("You have not bookmarked this book", 404)
+        payload = request.get_json(silent=True)
+        release = release_from_dict(payload.get("release") if isinstance(payload, dict) else None)
+        if release is None:
+            return _error("Expected a JSON object with a release", 400)
+        auth_mode = resolve_auth_mode()
+        if not user_may_download(
+            user_db, viewer_id, release.source, auth_mode=auth_mode, is_admin=is_admin
+        ):
+            return _error("You may not download from this source", 403, code="wanted_forbidden")
+        user = user_db.get_user(user_id=viewer_id) if user_db and viewer_id else None
+        owner = {"user_id": viewer_id, "username": user.get("username") if user else None}
+        queued, error = scheduler.grab(wanted_id, release, owner)
+        if not queued:
+            return _error(error or "Could not queue the release", 409)
+        _changed(wanted_id)
+        return jsonify({"status": "queued", "task_id": release.source_id})
 
     @app.route("/api/wanted/<int:wanted_id>/search", methods=["POST"])
     def api_wanted_search_now(wanted_id: int) -> ResponseReturnValue:

@@ -20,6 +20,8 @@ export interface Book {
   title: string;
   author: string;
   year?: string;
+  /** Full publication date (YYYY-MM-DD), when the metadata provider knows it. */
+  release_date?: string;
   language?: string;
   format?: string;
   size?: string;
@@ -594,6 +596,7 @@ export interface WantedItem {
   obtained_reason: 'downloaded' | 'in_library' | null;
   attempt_count: number;
   created_at: string | null;
+  release_date: string | null;
   subscriber_count: number;
   subscribed: boolean;
   /** The viewer's own language choice; null means their default languages. */

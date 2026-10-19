@@ -300,22 +300,27 @@ def _book_numbers(book: dict[str, Any]) -> set[int]:
 
 def names_the_book(release: Release, book: dict[str, Any]) -> bool:
     """Whether a release is this book rather than another work, volume or bundle."""
+    return book_mismatch(release, book) is None
+
+
+def book_mismatch(release: Release, book: dict[str, Any]) -> str | None:
+    """Why a release is not this book (another work, volume or bundle); None if it is."""
     titles = _raw_titles(book)
     if not titles:
-        return False
+        return "The bookmark has no title"
     author_candidates = book_author_candidates(book)
     release_words = _release_words(release.title)
     release_word_set = set(release_words)
     book_words = _book_words(book, author_candidates)
 
     if (release_word_set & COLLECTION_MARKERS) - book_words:
-        return False
+        return "A collection or bundle"
     # A word the book's own metadata uses ("Xi" in an author's name) is no numeral.
     release_numbers = _numbers(
         word for word in release_words if word.isdigit() or word not in book_words
     )
     if release_numbers - _book_numbers(book):
-        return False
+        return "Another volume or part"
 
     def matches(title: str) -> bool:
         for variant in _word_variants(title):
@@ -328,7 +333,7 @@ def names_the_book(release: Release, book: dict[str, Any]) -> bool:
         return False
 
     if not any(matches(title) for title in titles):
-        return False
+        return "Title does not match"
     extra = {
         word
         for word in release_word_set
@@ -340,15 +345,14 @@ def names_the_book(release: Release, book: dict[str, Any]) -> bool:
         and word not in book_words
     }
     if extra:
-        return False
+        return f"Names another work ({', '.join(sorted(extra)[:3])})"
     release_author = _release_author(release)
     author_names = _raw_author_names(book)
     if release_author and author_names:
         offered = _fold(release_author)
-        return any(
-            author_affinity(_fold(name), offered) != AUTHOR_MISMATCH for name in author_names
-        )
-    return True
+        if all(author_affinity(_fold(name), offered) == AUTHOR_MISMATCH for name in author_names):
+            return "Different author"
+    return None
 
 
 def language_matches(release_language: str | None, languages: list[str] | None) -> bool:
@@ -386,19 +390,28 @@ def _format_of(release: Release) -> str | None:
     return fmt or None
 
 
-def _qualifies(release: Release, book: dict[str, Any], prefs: PickerPreferences) -> bool:
+def rejection_reason(
+    release: Release,
+    book: dict[str, Any],
+    prefs: PickerPreferences,
+    excluded_keys: set[str] | frozenset[str] = frozenset(),
+) -> str | None:
+    """Why the wanted list would not try a release for ``book``; None if it would."""
+    keys = release_attempt_keys(release.source, release.source_id, release_match_key(release))
+    if keys & excluded_keys:
+        return "Failed or was cancelled before"
     if release.content_type in _NON_EBOOK_CONTENT_TYPES:
-        return False
+        return "Not an ebook"
     fmt = _format_of(release)
     if fmt is not None and (fmt not in prefs.supported_formats or fmt in prefs.excluded_formats):
-        return False
+        return f"{fmt.upper()} is not a wanted format"
     if not language_matches(release.language, list(prefs.languages) or None):
-        return False
+        return "Not in a wanted language"
     if release.size_bytes is not None and release.size_bytes > MAX_EBOOK_SIZE_BYTES:
-        return False
+        return "Too large for an ebook"
     if release.seeders is not None and release.protocol == "torrent" and release.seeders <= 0:
-        return False
-    return names_the_book(release, book)
+        return "No seeders"
+    return book_mismatch(release, book)
 
 
 def pick_releases(
@@ -419,8 +432,7 @@ def pick_releases(
 
     ranked: list[tuple[tuple[Any, ...], Release]] = []
     for index, release in enumerate(releases):
-        keys = release_attempt_keys(release.source, release.source_id, release_match_key(release))
-        if keys & excluded_keys or not _qualifies(release, book, prefs):
+        if rejection_reason(release, book, prefs, excluded_keys) is not None:
             continue
         fmt = _format_of(release)
         score = max(

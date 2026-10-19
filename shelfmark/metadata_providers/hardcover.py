@@ -37,6 +37,7 @@ from shelfmark.metadata_providers import (
     SearchType,
     SortOrder,
     TextSearchField,
+    parse_release_date,
     register_provider,
     register_provider_kwargs,
 )
@@ -2835,6 +2836,7 @@ class HardcoverProvider(MetadataProvider):
                 cover_url=cover_url,
                 description=full_description,
                 publish_year=publish_year,
+                release_date=parse_release_date(item.get("release_date")),
                 source_url=source_url,
                 display_fields=display_fields,
             )
@@ -2994,6 +2996,7 @@ class HardcoverProvider(MetadataProvider):
             cover_url=cover_url,
             description=full_description,
             publish_year=publish_year,
+            release_date=parse_release_date(book.get("release_date")),
             genres=genres,
             source_url=source_url,
             series_id=series_id,

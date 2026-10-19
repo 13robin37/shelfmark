@@ -56,6 +56,7 @@ _BOOK_DATA_KEYS = (
     "search_title",
     "search_author",
     "titles_by_language",
+    "release_date",
 )
 
 _UPDATABLE_ITEM_COLUMNS = frozenset(
@@ -686,6 +687,10 @@ class WantedService:
             until = datetime.fromisoformat(deciding) + timedelta(days=BLOCK_EXPIRY_DAYS)
             blocked[key] = until.isoformat(timespec="seconds")
         return blocked
+
+    def blocked_release_keys(self, wanted_id: int) -> set[str]:
+        """Keys of releases blocked for now, whatever the cycle."""
+        return set(self._blocked_keys(self._attempt_rows(wanted_id)))
 
     def excluded_release_keys(self, wanted_id: int, cycle: int) -> set[str]:
         """Keys of releases not to try now: blocked, or already tried this cycle."""

@@ -1007,3 +1007,102 @@ def test_the_wait_for_a_format_ends(env):
         env.scheduler.tick()
 
     assert env.queued[-1][0]["source_id"] == "aa-mobi"
+
+
+def test_an_unreleased_book_waits_without_searching(env):
+    wanted_id = env.add(release_date="2999-03-12")
+    searched: list[str] = []
+    with patch(
+        "shelfmark.core.release_search.search_source_releases",
+        side_effect=lambda source, *_a, **_k: searched.append(source),
+    ):
+        env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert searched == []
+    assert item["state"] == STATE_WAITING
+    assert item["next_search_at"].startswith("2999-03-11")
+    assert item["search_count"] == 0
+
+
+def test_a_release_date_found_in_the_metadata_defers_the_search(env):
+    future = BookMetadata(
+        provider="hardcover",
+        provider_id="1",
+        title="Dune",
+        authors=["Frank Herbert"],
+        release_date="2999-03-12",
+    )
+    with patch.object(ws.WantedScheduler, "_resolve_book", staticmethod(lambda _data: future)):
+        wanted_id = env.add()
+        env.scheduler.tick()
+
+    item = env.item(wanted_id)
+    assert env.queued == []
+    assert item["book_data"]["release_date"] == "2999-03-12"
+    assert item["next_search_at"].startswith("2999-03-11")
+
+
+def test_a_future_year_alone_waits_for_that_year():
+    assert ws._search_starts({"year": "2999"}).isoformat().startswith("2998-12-31")
+    assert ws._search_starts({"year": "2001"}) is None
+    assert ws._search_starts({"release_date": "2001-01-01"}) is None
+
+
+def test_releases_are_evaluated_like_the_wanted_list_would(env):
+    wanted_id = env.add()
+    releases = [
+        _release("aa-1"),
+        _release("aa-pdf", fmt="pdf"),
+        _release("aa-3", title="Dune Messiah"),
+        _release("x-1", source="irc"),
+    ]
+
+    reasons = env.scheduler.evaluate(wanted_id, releases)
+
+    assert reasons["direct_download:aa-1"] is None
+    assert reasons["direct_download:aa-pdf"] == "PDF is not a wanted format"
+    assert reasons["direct_download:aa-3"].startswith("Names another work")
+    assert reasons["irc:x-1"] == "Source not used by the wanted list"
+
+
+def test_a_picked_release_downloads_for_every_subscriber(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+
+    queued, error = env.scheduler.grab(
+        wanted_id, _release("aa-2", fmt="mobi"), {"user_id": env.bob["id"], "username": "bob"}
+    )
+
+    assert (queued, error) == (True, None)
+    assert env.queued[-1][0]["source_id"] == "aa-2"
+    assert env.queued_kwargs[-1]["wanted_id"] == wanted_id
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+    task = _downloaded(env, wanted_id, tmp_path)
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+    # Bob's download lands in his target; Alice gets hers from a copy.
+    assert env.queued[-1][1] == env.alice["id"]
+
+
+def test_a_picked_release_needs_a_waiting_item(env):
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, state="paused")
+
+    queued, error = env.scheduler.grab(wanted_id, _release("aa-2"), {"user_id": env.alice["id"]})
+
+    assert queued is False
+    assert "paused" in error
+    assert env.queued == []
+
+
+def test_releases_from_the_frontend_are_validated():
+    release = ws.release_from_dict(
+        {"source": "libgen", "source_id": "1", "title": "Dune", "seeders": "7", "extra": None}
+    )
+    assert release is not None
+    assert release.seeders is None
+    assert release.extra == {}
+    assert ws.release_from_dict({"source": "libgen", "title": "Dune"}) is None
+    assert ws.release_from_dict(["nope"]) is None

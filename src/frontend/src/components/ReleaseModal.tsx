@@ -8,6 +8,7 @@ import { useReleaseSearchSession } from '../hooks/releaseModal/useReleaseSearchS
 import { useTabIndicator } from '../hooks/ui/useTabIndicator';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { useEscapeKey } from '../hooks/useEscapeKey';
+import { useDependencyEffect } from '../hooks/useMountEffect';
 import { inspectRelease } from '../services/api';
 import type {
   Book,
@@ -415,6 +416,7 @@ const ReleaseRow = ({
   selectionMode = false,
   isSelected = false,
   onSelect,
+  wantedNote,
 }: {
   release: Release;
   index: number;
@@ -428,8 +430,15 @@ const ReleaseRow = ({
   selectionMode?: boolean;
   isSelected?: boolean;
   onSelect?: () => void;
+  /** Why the wanted list would skip this release, for a bookmarked book. */
+  wantedNote?: string | null;
 }) => {
   const author = toStringValue(release.extra?.author);
+  const wantedNoteLine = wantedNote ? (
+    <p className="truncate text-[11px] text-amber-700 dark:text-amber-300" title={wantedNote}>
+      Wanted list would skip: {wantedNote}
+    </p>
+  ) : null;
 
   // Filter columns visible on mobile
   const mobileColumns = columns.filter((c) => !c.hide_mobile);
@@ -503,6 +512,7 @@ const ReleaseRow = ({
             )}
           </p>
           {author && <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">{author}</p>}
+          {wantedNoteLine}
         </div>
 
         {/* Dynamic columns from schema */}
@@ -552,6 +562,7 @@ const ReleaseRow = ({
               <span className="font-normal text-zinc-500 dark:text-zinc-400"> — {author}</span>
             )}
           </p>
+          {wantedNoteLine}
           {/* Plugin-provided info line (format, size, indexer, seeders, etc.) */}
           {mobileColumns.length > 0 && (
             <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
@@ -779,7 +790,12 @@ const ReleaseModalSession = ({
     contentType === 'audiobook' && supportedAudiobookFormats.length > 0
       ? supportedAudiobookFormats
       : supportedFormats;
-  const { canBookmarkBook } = useWanted();
+  const { canBookmarkBook, stateFor, evaluateReleases, grab } = useWanted();
+  const wantedState = stateFor(book);
+  const wantedId = wantedState?.subscribed ? wantedState.id : null;
+  // A download started here counts for the bookmark while it waits for a release.
+  const grabsForWanted = wantedId !== null && wantedState?.state === 'waiting';
+  const [wantedNotes, setWantedNotes] = useState<Record<string, string | null>>({});
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   // Multi-book packs: `multiBook` is the manual header toggle (heuristic split for
@@ -845,6 +861,29 @@ const ReleaseModalSession = ({
     bookLanguages,
     defaultLanguages,
   });
+
+  // For a bookmarked book, show which releases the wanted list itself would pass over.
+  useDependencyEffect(() => {
+    if (wantedId === null) {
+      setWantedNotes({});
+      return undefined;
+    }
+    const releases = Object.values(releasesBySource).flatMap((entry) => entry?.releases ?? []);
+    if (releases.length === 0) {
+      return undefined;
+    }
+    let cancelled = false;
+    evaluateReleases(wantedId, releases)
+      .then((notes) => {
+        if (!cancelled) {
+          setWantedNotes(notes);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [wantedId, releasesBySource]);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bookSummaryRef = useRef<HTMLDivElement>(null);
@@ -1261,6 +1300,12 @@ const ReleaseModalSession = ({
             }. If it contains several books, enable the multi-book pack toggle.`,
           );
         }
+        if (grabsForWanted && wantedId !== null && !multiBook && contentType === 'ebook') {
+          if (await grab(wantedId, release, book.title)) {
+            handleClose();
+          }
+          return;
+        }
         await onDownload(book, release, contentType, multiBook ? { multiBook: true } : {});
         handleClose();
         return;
@@ -1281,6 +1326,9 @@ const ReleaseModalSession = ({
       contentType,
       handleClose,
       multiBook,
+      grabsForWanted,
+      wantedId,
+      grab,
     ],
   );
 
@@ -2348,6 +2396,7 @@ const ReleaseModalSession = ({
                           release={release}
                           index={index}
                           onDownload={() => handleReleaseAction(release)}
+                          wantedNote={wantedNotes[`${release.source}:${release.source_id}`]}
                           buttonState={getButtonState(release)}
                           columns={columnConfig.columns}
                           gridTemplate={columnConfig.grid_template}

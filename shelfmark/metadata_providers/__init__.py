@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar, TypeVar
 
@@ -202,6 +203,7 @@ class BookMetadata:
     description: str | None = None
     publisher: str | None = None
     publish_year: int | None = None
+    release_date: str | None = None  # Full publication date (YYYY-MM-DD), when known
     language: str | None = None
     genres: list[str] = field(default_factory=list)
     source_url: str | None = None  # Link to book on provider's site
@@ -224,6 +226,24 @@ class BookMetadata:
     # Alternative titles by language (for localized searches)
     # Maps language code (e.g., "de", "German") to localized title
     titles_by_language: dict[str, str] = field(default_factory=dict)
+
+
+_RELEASE_DATE_FORMATS = ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y")
+
+
+def parse_release_date(value: object) -> str | None:
+    """A full publication date as YYYY-MM-DD; None for a bare year or anything unclear."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for fmt in _RELEASE_DATE_FORMATS:
+        candidate = text[:10] if fmt == "%Y-%m-%d" else text
+        try:
+            # A calendar date, not a moment: no time zone applies.
+            return datetime.strptime(candidate, fmt).date().isoformat()  # noqa: DTZ007
+        except ValueError:
+            continue
+    return None
 
 
 def group_languages_by_localized_title(

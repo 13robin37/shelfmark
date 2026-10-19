@@ -35,6 +35,7 @@ export const buildWantedBookPayload = (book: Book): WantedBookPayload | null => 
     isbn_13: book.isbn_13,
     isbn_10: book.isbn_10,
     year: book.year,
+    release_date: book.release_date,
     preview: book.preview,
     series_name: book.series_name,
     series_position: book.series_position,
@@ -137,6 +138,15 @@ export const describeWantedItem = (item: WantedItem, now: number = Date.now()): 
   }
   if (item.state === 'paused') {
     return 'Paused by an admin';
+  }
+  const release = item.release_date ? Date.parse(item.release_date) : Number.NaN;
+  if (!Number.isNaN(release) && release > now) {
+    const date = new Date(release).toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+    return `Releases ${date}; searching starts a day before`;
   }
   const next = formatRelativeTime(item.next_search_at, now);
   const parts = [item.last_result, next ? `next search ${next}` : null].filter(Boolean);

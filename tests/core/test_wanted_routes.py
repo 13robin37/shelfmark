@@ -274,3 +274,66 @@ def test_only_admins_allow_a_release_again(env):
     _login(env, env["admin"], is_admin=True)
     assert client.delete(url).get_json()["cleared"] == 1
     assert service.list_attempts(item_id) == []
+
+
+def test_grab_and_evaluate_need_a_bookmark(env):
+    client = env["client"]
+    _login(env, env["alice"])
+    item_id = client.post("/api/wanted", json={"book": BOOK}).get_json()["item"]["id"]
+    release = {"source": "direct_download", "source_id": "md5", "title": "Dune"}
+
+    # Without a scheduler the routes answer as if the item were unknown.
+    assert client.post(f"/api/wanted/{item_id}/grab", json={"release": release}).status_code == 404
+    assert (
+        client.post(f"/api/wanted/{item_id}/evaluate", json={"releases": [release]}).status_code
+        == 404
+    )
+
+
+class _FakeScheduler:
+    def __init__(self):
+        self.grabbed = []
+
+    def evaluate(self, wanted_id, releases):
+        return {f"{r.source}:{r.source_id}": None for r in releases}
+
+    def grab(self, wanted_id, release, owner):
+        self.grabbed.append((wanted_id, release.source_id, owner))
+        return True, None
+
+
+def test_a_subscriber_may_pick_a_release_for_the_wanted_list(env):
+    scheduler = _FakeScheduler()
+    app = Flask("picked")
+    app.secret_key = "test"
+    register_wanted_routes(
+        app,
+        env["user_db"],
+        env["service"],
+        resolve_auth_mode=lambda: "builtin",
+        scheduler=scheduler,
+    )
+    client = app.test_client()
+    alice, bob = env["alice"], env["bob"]
+    item, _ = env["service"].add(user_id=alice["id"], book_data=BOOK)
+    release = {"source": "direct_download", "source_id": "md5", "title": "Dune"}
+
+    def login(user):
+        with client.session_transaction() as sess:
+            sess["user_id"] = user["username"]
+            sess["db_user_id"] = user["id"]
+            sess["is_admin"] = False
+
+    login(bob)
+    assert (
+        client.post(f"/api/wanted/{item['id']}/grab", json={"release": release}).status_code == 404
+    )
+
+    login(alice)
+    response = client.post(f"/api/wanted/{item['id']}/evaluate", json={"releases": [release, 7]})
+    assert response.get_json() == {"reasons": {"direct_download:md5": None}}
+    assert client.post(f"/api/wanted/{item['id']}/grab", json={"release": {}}).status_code == 400
+    assert (
+        client.post(f"/api/wanted/{item['id']}/grab", json={"release": release}).status_code == 200
+    )
+    assert scheduler.grabbed == [(item["id"], "md5", {"user_id": alice["id"], "username": "alice"})]

@@ -35,6 +35,7 @@ from shelfmark.metadata_providers import (
     SearchType,
     SortOrder,
     TextSearchField,
+    parse_release_date,
     register_provider,
     register_provider_kwargs,
 )
@@ -328,6 +329,7 @@ class GoogleBooksProvider(MetadataProvider):
             if published_date:
                 with suppress(ValueError, TypeError):
                     publish_year = int(published_date[:4])
+            release_date = parse_release_date(published_date)
 
             # Language
             language = volume_info.get("language")
@@ -364,6 +366,7 @@ class GoogleBooksProvider(MetadataProvider):
                 description=description,
                 publisher=publisher,
                 publish_year=publish_year,
+                release_date=release_date,
                 language=language,
                 genres=genres,
                 source_url=source_url,
