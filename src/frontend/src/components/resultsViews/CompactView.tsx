@@ -7,7 +7,7 @@ import { bookSupportsTargets } from '../../utils/bookTargetLoader';
 import { BookActionButton } from '../BookActionButton';
 import { BookTargetDropdown } from '../BookTargetDropdown';
 import { DisplayFieldBadges, DisplayFieldIcon, LibraryBadge } from '../shared';
-import { WantedToggleButton } from '../WantedToggleButton';
+import { WantedBadge, WantedToggleButton } from '../WantedToggleButton';
 
 const SkeletonLoader = () => (
   <div className="h-full w-full animate-pulse bg-linear-to-r from-gray-300 via-gray-200 to-gray-300 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700" />
@@ -100,7 +100,10 @@ export const CompactView = ({
               #{book.series_position}
             </div>
           )}
-          <LibraryBadge library={book.library} overlay className="absolute top-2 right-2 z-10" />
+          <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
+            <LibraryBadge library={book.library} overlay />
+            <WantedBadge book={book} overlay />
+          </div>
           {book.preview && !imageError ? (
             <>
               {!imageLoaded && (

@@ -79,23 +79,28 @@ describe('resolveWantedState', () => {
   it('prefers a local toggle over everything else', () => {
     const overrides = new Map<string, WantedBookState | null>([[key, null]]);
     const own = indexOwnWantedItems([item()]);
-    expect(resolveWantedState(book, overrides, own)).toBeUndefined();
+    expect(resolveWantedState(book, overrides, own, true)).toBeUndefined();
   });
 
-  it('uses the viewer’s own items, then the search result', () => {
-    expect(resolveWantedState(book, new Map(), indexOwnWantedItems([item()]))).toEqual({
+  it('uses the viewer’s own items', () => {
+    expect(resolveWantedState(book, new Map(), indexOwnWantedItems([item()]), true)).toEqual({
       id: 7,
       state: 'waiting',
       subscribed: true,
     });
+  });
+
+  it('trusts the search result only until the list has loaded', () => {
     const fromSearch = { ...book, wanted: { id: 9, state: 'paused' as const, subscribed: true } };
-    expect(resolveWantedState(fromSearch, new Map(), new Map())?.id).toBe(9);
+    expect(resolveWantedState(fromSearch, new Map(), new Map(), false)?.id).toBe(9);
+    // Removed elsewhere since the search ran: the loaded list is the truth.
+    expect(resolveWantedState(fromSearch, new Map(), new Map(), true)).toBeUndefined();
   });
 
   it('ignores items the viewer did not bookmark', () => {
     const own = indexOwnWantedItems([item({ subscribed: false })]);
     const notMine = { ...book, wanted: { id: 9, state: 'waiting' as const, subscribed: false } };
-    expect(resolveWantedState(notMine, new Map(), own)).toBeUndefined();
+    expect(resolveWantedState(notMine, new Map(), own, false)).toBeUndefined();
   });
 });
 

@@ -402,7 +402,13 @@ export const DetailsModal = ({
                 </a>
               )}
               <div className="flex w-full flex-col gap-3 sm:ml-auto sm:w-auto sm:flex-row sm:items-center">
-                {isMetadata && <WantedToggleButton book={book} variant="pill" />}
+                {isMetadata && (
+                  <WantedToggleButton
+                    book={book}
+                    variant="pill"
+                    className="self-start sm:self-auto"
+                  />
+                )}
                 {hasBookTargets && bookProvider && bookProviderId && (
                   <BookTargetDropdown
                     provider={bookProvider}

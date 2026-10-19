@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 
 import { useDependencyEffect } from '../hooks/useMountEffect';
 import {
@@ -65,6 +65,8 @@ export function useWanted(): WantedContextValue {
 
 interface WantedProviderProps {
   active: boolean;
+  /** Bumped whenever settings are saved, so the wanted list re-reads its switches. */
+  settingsVersion: number;
   isAdmin: boolean;
   contentType: ContentType;
   onShowToast: ShowToast;
@@ -73,6 +75,7 @@ interface WantedProviderProps {
 
 export function WantedProvider({
   active,
+  settingsVersion,
   isAdmin,
   contentType,
   onShowToast,
@@ -82,31 +85,43 @@ export function WantedProvider({
   const [enabled, setEnabled] = useState(false);
   const [canBookmark, setCanBookmark] = useState(false);
   const [items, setItems] = useState<WantedItem[]>([]);
+  const [listLoaded, setListLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const latestRequest = useRef(0);
   const [overrides, setOverrides] = useState<Map<string, WantedBookState | null>>(() => new Map());
 
   const refresh = useCallback(async () => {
     if (!active) {
       return;
     }
+    latestRequest.current += 1;
+    const request = latestRequest.current;
     setLoading(true);
     try {
       const status = await getWantedStatus();
+      const nextItems = status.enabled ? await listWanted() : [];
+      // A later refresh has started; its answer is the newer one.
+      if (request !== latestRequest.current) {
+        return;
+      }
       setEnabled(status.enabled);
       setCanBookmark(status.can_bookmark);
-      setItems(status.enabled ? await listWanted() : []);
+      setItems(nextItems);
+      setListLoaded(true);
       setOverrides(new Map());
     } catch (error) {
       console.warn('Failed to load the wanted list:', error);
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) {
+        setLoading(false);
+      }
     }
   }, [active]);
 
   // The wanted list lives on the server; load it whenever the viewer can see it.
   useDependencyEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, settingsVersion]);
 
   useDependencyEffect(() => {
     if (!socket || !active) {
@@ -124,8 +139,8 @@ export function WantedProvider({
   const ownItems = useMemo(() => indexOwnWantedItems(items), [items]);
 
   const stateFor = useCallback(
-    (book: Book) => resolveWantedState(book, overrides, ownItems),
-    [overrides, ownItems],
+    (book: Book) => resolveWantedState(book, overrides, ownItems, listLoaded),
+    [overrides, ownItems, listLoaded],
   );
 
   const canBookmarkBook = useCallback(

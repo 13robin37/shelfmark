@@ -111,3 +111,36 @@ export const WantedToggleButton = ({
     </button>
   );
 };
+
+/** Always-visible marker for a book on the viewer's wanted list (the toggle may hide). */
+export const WantedBadge = ({
+  book,
+  overlay = false,
+  className = '',
+}: {
+  book: Book;
+  overlay?: boolean;
+  className?: string;
+}) => {
+  const { canBookmarkBook, stateFor } = useWanted();
+  if (!canBookmarkBook(book) || stateFor(book)?.subscribed !== true) {
+    return null;
+  }
+  const pill = overlay
+    ? 'rounded-md border border-sky-700 bg-sky-600 px-1.5 py-0.5 text-[10px] font-bold text-white'
+    : 'rounded-md bg-sky-600/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:text-sky-300';
+  const style = overlay
+    ? { boxShadow: '0 2px 8px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3)' }
+    : undefined;
+  return (
+    <span
+      className={`flex w-fit items-center gap-0.5 ${pill} ${className}`}
+      style={style}
+      title="On your wanted list"
+      aria-label="On your wanted list"
+    >
+      <EyeIcon className="h-3 w-3" filled />
+      Wanted
+    </span>
+  );
+};

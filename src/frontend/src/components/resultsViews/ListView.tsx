@@ -8,7 +8,7 @@ import { getFormatColor, getLanguageColor } from '../../utils/colorMaps';
 import { BookActionButton } from '../BookActionButton';
 import { BookTargetDropdown } from '../BookTargetDropdown';
 import { DisplayFieldIcon, DisplayFieldBadge, LibraryBadge } from '../shared';
-import { WantedToggleButton } from '../WantedToggleButton';
+import { WantedBadge, WantedToggleButton } from '../WantedToggleButton';
 
 interface ListViewProps {
   books: Book[];
@@ -205,6 +205,7 @@ export const ListView = ({
                     {book.year && <span className="sm:hidden"> • {book.year}</span>}
                   </p>
                   <LibraryBadge library={book.library} className="mt-0.5" />
+                  <WantedBadge book={book} className="mt-0.5" />
                 </div>
 
                 {/* Mobile universal mode info */}

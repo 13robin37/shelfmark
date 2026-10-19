@@ -44,12 +44,14 @@ export const buildWantedBookPayload = (book: Book): WantedBookPayload | null => 
 
 /**
  * The viewer's bookmark state for a book: local toggles first, then the viewer's own
- * wanted items, then what the search results reported.
+ * wanted items. What the search results reported only counts until the list has loaded;
+ * after that it may be stale (removed in another tab, or by an admin).
  */
 export const resolveWantedState = (
   book: Book,
   overrides: ReadonlyMap<string, WantedBookState | null>,
   ownItems: ReadonlyMap<string, WantedItem>,
+  listLoaded: boolean,
 ): WantedBookState | undefined => {
   if (!book.provider || !book.provider_id) {
     return undefined;
@@ -61,6 +63,9 @@ export const resolveWantedState = (
   const item = ownItems.get(key);
   if (item) {
     return { id: item.id, state: item.state, subscribed: true };
+  }
+  if (listLoaded) {
+    return undefined;
   }
   return book.wanted?.subscribed ? book.wanted : undefined;
 };

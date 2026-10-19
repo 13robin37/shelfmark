@@ -222,6 +222,17 @@ def _words(text: object) -> list[str]:
     return [word for word in _WORD_PATTERN.findall(_fold(text)) if word != "_"]
 
 
+def _word_variants(text: object) -> list[list[str]]:
+    """Words of ``text`` with its apostrophes dropped and with them as spaces.
+
+    Release names spell "Ender's" as "Enders", "Ender s" or "Ender.s"; either form of
+    the book's words has to match.
+    """
+    if not isinstance(text, str):
+        return []
+    return [_words(text), _words(_APOSTROPHES.sub(" ", text))]
+
+
 def _number_of(word: str) -> int | None:
     if word.isdigit():
         return int(word)
@@ -254,22 +265,29 @@ def _release_words(title: str) -> list[str]:
 def _book_words(book: dict[str, Any], author_candidates: list[str]) -> set[str]:
     """Every word the book's own metadata accounts for."""
     words: set[str] = set()
-    for title in _raw_titles(book):
-        words |= set(_words(title))
-    for key in ("series_name", "subtitle"):
-        words |= set(_words(book.get(key)))
+    texts = [*_raw_titles(book), book.get("series_name"), book.get("subtitle")]
+    for text in [*texts, *_raw_author_names(book)]:
+        for variant in _word_variants(text):
+            words |= set(variant)
     for author in author_candidates:
         words |= set(author.split(" "))
-    raw_authors = book.get("authors")
-    for author in [book.get("author"), *(raw_authors if isinstance(raw_authors, list) else [])]:
-        words |= set(_words(author))
     return words
+
+
+def _raw_author_names(book: dict[str, Any]) -> list[str]:
+    raw_authors = book.get("authors")
+    names = [book.get("search_author"), book.get("author")]
+    names.extend(raw_authors if isinstance(raw_authors, list) else [])
+    return [name for name in names if isinstance(name, str) and name.strip()]
 
 
 def _book_numbers(book: dict[str, Any]) -> set[int]:
     numbers: set[int] = set()
     for text in [*_raw_titles(book), book.get("subtitle")]:
         numbers |= {number for word in _words(text) if (number := _number_of(word)) is not None}
+    count = book.get("series_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        numbers.add(count)
     position = book.get("series_position")
     if (
         isinstance(position, (int, float))
@@ -300,11 +318,14 @@ def names_the_book(release: Release, book: dict[str, Any]) -> bool:
         return False
 
     def matches(title: str) -> bool:
-        title_words = _significant(_words(title))
-        if not title_words:
-            return False
-        present = sum(1 for word in title_words if word in release_word_set)
-        return present / len(title_words) >= _TITLE_MATCH_THRESHOLD
+        for variant in _word_variants(title):
+            title_words = _significant(variant)
+            if not title_words:
+                continue
+            present = sum(1 for word in title_words if word in release_word_set)
+            if present / len(title_words) >= _TITLE_MATCH_THRESHOLD:
+                return True
+        return False
 
     if not any(matches(title) for title in titles):
         return False
@@ -321,10 +342,11 @@ def names_the_book(release: Release, book: dict[str, Any]) -> bool:
     if extra:
         return False
     release_author = _release_author(release)
-    if release_author and author_candidates:
+    author_names = _raw_author_names(book)
+    if release_author and author_names:
+        offered = _fold(release_author)
         return any(
-            author_affinity(candidate, release_author) != AUTHOR_MISMATCH
-            for candidate in author_candidates
+            author_affinity(_fold(name), offered) != AUTHOR_MISMATCH for name in author_names
         )
     return True
 

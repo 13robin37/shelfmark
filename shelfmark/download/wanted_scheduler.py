@@ -80,10 +80,13 @@ _SOURCE_SETTINGS_TABS = (
 # Failure kinds that may be the release's fault. Anything else (a worker exception, a
 # disabled source) happened on our side and says nothing about the release.
 _RELEASE_FAILURE_TYPES = frozenset({None, "StatusCallbackError", "UnknownFailure"})
-# Messages of failures that come from our own destination or output settings.
+# Messages of failures that come from our own destination, output, download client or an
+# outage - nothing that says the release itself is bad.
 _LOCAL_FAILURE_PATTERN = re.compile(
-    r"destination|not writable|permission|custom script|smtp|email|booklore|no space|"
-    r"disk full|cannot create",
+    r"destination|not writable|permission|custom script|smtp|email|booklore|grimmory|"
+    r"no space|disk full|cannot create|could not connect|connection|timed out|timeout|"
+    r"authentication|unauthorized|qbittorrent|transmission|deluge|rtorrent|sabnzbd|"
+    r"nzbget|download client",
     re.IGNORECASE,
 )
 # A user's own search makes background searches wait, but never longer than this.
@@ -303,6 +306,13 @@ class WantedScheduler:
 
     def _reconcile_downloads(self) -> None:
         """Finish attempts whose end the terminal hook missed (a crash in it, a lost task)."""
+        if self._task_lookup is None:
+            return
+        # Download endings arrive on other threads; reconcile must not interleave with one.
+        with self._terminal_lock:
+            self._reconcile_downloads_locked()
+
+    def _reconcile_downloads_locked(self) -> None:
         if self._task_lookup is None:
             return
         for item in self._service.items_in_state(STATE_DOWNLOADING):
@@ -750,7 +760,7 @@ class WantedScheduler:
         with self._delivery_lock:
             extra = self._extras.pop(task_id, None)
         if extra is not None:
-            self._extra_delivery_ended(extra, task_id, status)
+            self._extra_delivery_ended(extra, task_id, status, task)
             return
         item = self._service.get_item(wanted_id)
         if item is None:
@@ -961,7 +971,11 @@ class WantedScheduler:
         self._settle_deliveries(item)
 
     def _extra_delivery_ended(
-        self, extra: tuple[int, list[int | None], Path], task_id: str, status: QueueStatus
+        self,
+        extra: tuple[int, list[int | None], Path],
+        task_id: str,
+        status: QueueStatus,
+        task: Any,
     ) -> None:
         wanted_id, user_ids, copy = extra
         item = self._service.get_item(wanted_id)
@@ -969,10 +983,32 @@ class WantedScheduler:
             self._service.mark_delivered(wanted_id, user_ids, task_id)
             self._notify_obtained(item, user_ids, reason="downloaded")
         else:
-            # A failed delivery keeps its copy for a manual retry; ours is no use now.
+            # The subscribers stay waiting and the next search finds them a download of
+            # their own, so the copy is of no further use.
             _remove_path(copy.parent)
+            message = getattr(task, "status_message", None)
+            stalled = isinstance(message, str) and message.startswith(_STALLED_MESSAGE_PREFIX)
+            if status == QueueStatus.CANCELLED and not stalled and item is not None:
+                self._reject_delivered_release(item, task_id, task)
         if item is not None:
             self._settle_deliveries(item)
+
+    def _reject_delivered_release(self, item: dict[str, Any], extra_id: str, task: Any) -> None:
+        """A cancelled delivery rejects its release, as cancelling the download would."""
+        source_id = extra_id.split("~wanted-", 1)[0]
+        source = str(getattr(task, "source", "") or "")
+        self._service.record_attempt(
+            item["id"],
+            cycle=int(item.get("search_count") or 0),
+            source=source,
+            source_id=source_id,
+            match_key=None,
+            release_title=getattr(task, "title", None),
+            file_format=getattr(task, "format", None),
+            size=getattr(task, "size", None),
+            indexer=None,
+        )
+        self._service.finish_attempt(item["id"], source_id, ATTEMPT_REJECTED, "Delivery cancelled")
 
     def _settle_deliveries(self, item: dict[str, Any]) -> None:
         """Decide an item's state once its download finished delivering."""

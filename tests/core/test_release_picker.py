@@ -273,3 +273,36 @@ def test_names_the_book_handles_accents_apostrophes_and_author_words(book, title
 def test_roman_volume_numbers_count_as_numbers():
     book = {"title": "Saga, Vol. I", "provider": "x", "provider_id": "1", "series_position": 1}
     assert not names_the_book(_release("Saga, Vol. II"), book)
+
+
+@pytest.mark.parametrize(
+    ("book", "title"),
+    [
+        (
+            {"title": "Ender's Game", "author": "Orson Scott Card"},
+            "Orson.Scott.Card.-.Ender.s.Game.EPUB",
+        ),
+        (
+            {"title": "Ender's Game", "author": "Orson Scott Card"},
+            "Orson Scott Card - Ender s Game",
+        ),
+        ({"title": "Ender's Game", "author": "Orson Scott Card"}, "Enders Game"),
+        (
+            {"title": "Don't Make Me Think", "author": "Steve Krug"},
+            "Steve Krug - Don t Make Me Think",
+        ),
+        ({"title": "Dune", "series_position": 1, "series_count": 6}, "Dune (Book I of VI)"),
+    ],
+)
+def test_names_the_book_accepts_every_apostrophe_spelling(book, title):
+    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+
+
+def test_release_author_is_compared_without_accents():
+    book = {
+        "title": "Der Schwarm",
+        "author": "Frank Schatzing",
+        "provider": "x",
+        "provider_id": "1",
+    }
+    assert names_the_book(_release("Der Schwarm", extra={"author": "Frank Schätzing"}), book)

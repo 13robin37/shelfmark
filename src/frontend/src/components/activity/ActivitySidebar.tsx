@@ -262,6 +262,7 @@ export const ActivitySidebar = ({
 
   const isPinnedOpen = isOpen && isDesktop && isPinned;
   const { enabled: wantedEnabled, items: wantedItems } = useWanted();
+  const activeWantedCount = wantedItems.filter((item) => item.state !== 'obtained').length;
   const tabHidden =
     (!showRequestsTab && activeTab === 'requests') || (!wantedEnabled && activeTab === 'wanted');
   const effectiveActiveTab = tabHidden ? 'all' : activeTab;
@@ -570,7 +571,7 @@ export const ActivitySidebar = ({
   const tabIndicatorStyle = useTabIndicator(
     tabRefs,
     effectiveActiveTab,
-    `${showRequestsTab}:${wantedEnabled}`,
+    `${showRequestsTab}:${wantedEnabled}:${activeWantedCount}:${pendingRequestCount}`,
   );
 
   const panel = (
@@ -831,9 +832,9 @@ export const ActivitySidebar = ({
                   aria-current={effectiveActiveTab === 'wanted' ? 'page' : undefined}
                 >
                   Wanted
-                  {wantedItems.some((item) => item.state !== 'obtained') && (
+                  {activeWantedCount > 0 && (
                     <span className="ml-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-sky-500/15 px-1 text-[11px] leading-none text-sky-700 dark:text-sky-300">
-                      {wantedItems.filter((item) => item.state !== 'obtained').length}
+                      {activeWantedCount}
                     </span>
                   )}
                 </button>

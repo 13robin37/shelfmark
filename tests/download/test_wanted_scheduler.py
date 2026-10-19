@@ -736,3 +736,40 @@ def test_a_user_template_makes_every_user_a_target(env):
         patch("shelfmark.core.utils.get_destination", return_value="/books"),
     ):
         assert ws.delivery_target(1, "alice") != ws.delivery_target(2, "bob")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Grimmory upload failed (500)",
+        "Could not connect to Grimmory",
+        "Failed to add to qBittorrent: connection refused",
+    ],
+)
+def test_output_and_client_outages_are_local(env, message):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    with patch("shelfmark.core.notifications.notify_admin"):
+        env.finish(wanted_id, QueueStatus.ERROR, message, staged_path="/tmp/shelfmark/Dune.epub")
+
+    assert env.service.list_attempts(wanted_id)[0]["status"] == "cancelled"
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+
+
+def test_a_cancelled_extra_delivery_rejects_the_release(env, two_targets, tmp_path):
+    del two_targets
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    task = _downloaded(env, wanted_id, tmp_path)
+    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+    extra_id = env.queued[-1][0]["source_id"]
+    extra = SimpleNamespace(
+        wanted_id=wanted_id, task_id=extra_id, source="direct_download", status_message="Cancelled"
+    )
+
+    env.scheduler.on_task_terminal(extra_id, QueueStatus.CANCELLED, extra)
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+    excluded = env.service.excluded_release_keys(wanted_id, 99)
+    assert "id:direct_download:aa-1" in excluded

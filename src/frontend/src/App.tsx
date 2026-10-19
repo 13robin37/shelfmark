@@ -971,8 +971,10 @@ function App() {
     [refreshRequestPolicy, handleSearch, config],
   );
 
+  const [settingsVersion, setSettingsVersion] = useState(0);
   const handleSettingsSaved = useCallback(() => {
     void loadConfig('settings-saved');
+    setSettingsVersion((version) => version + 1);
   }, [loadConfig]);
 
   // Show book details
@@ -2430,6 +2432,7 @@ function App() {
     <SearchModeProvider searchMode={effectiveSearchMode}>
       <WantedProvider
         active={isAuthenticated || !authRequired}
+        settingsVersion={settingsVersion}
         isAdmin={requestRoleIsAdmin || !authRequired}
         contentType={effectiveContentType}
         onShowToast={showToast}
