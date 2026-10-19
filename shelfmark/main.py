@@ -96,6 +96,7 @@ from shelfmark.core.viewer_redaction import (
 from shelfmark.core.wanted_service import WantedService
 from shelfmark.download import orchestrator as backend
 from shelfmark.download import warmup
+from shelfmark.download.wanted_scheduler import WantedScheduler
 from shelfmark.release_sources import (
     BrowseRecord,
     Release,
@@ -600,16 +601,31 @@ if user_db is not None:
     except _IMPORT_OPERATIONAL_ERRORS as e:
         logger.warning("Failed to register request routes: %s", e)
 
+wanted_scheduler: WantedScheduler | None = None
 if wanted_service is not None:
     import_module("shelfmark.config.wanted_settings")
     from shelfmark.core.wanted_routes import register_wanted_routes
 
+    wanted_scheduler = WantedScheduler(
+        wanted_service,
+        user_db,
+        resolve_auth_mode=_resolve_auth_mode_for_routes,
+        queue_release=_queue_release_for_routes,
+    )
     register_wanted_routes(
         app,
         user_db,
         wanted_service,
         resolve_auth_mode=_resolve_auth_mode_for_routes,
+        on_change=lambda _wanted_id: wanted_scheduler.wake() if wanted_scheduler else None,
     )
+    try:
+        _reset_wanted = wanted_service.reset_interrupted()
+        if _reset_wanted:
+            logger.info("Startup: %d interrupted wanted item(s) will search again", _reset_wanted)
+    except sqlite3.Error as exc:
+        logger.warning("Could not reset interrupted wanted items at startup: %s", exc)
+    wanted_scheduler.start()
 
 
 # Enable CORS in development mode for local frontend development
@@ -1461,6 +1477,9 @@ def _queue_status_to_notification_event(status: QueueStatus) -> NotificationEven
 def _notify_admin_for_terminal_download_status(
     *, task_id: str, status: QueueStatus, task: Any
 ) -> None:
+    # A wanted-list download is one attempt of several; the wanted list reports the outcome.
+    if getattr(task, "wanted_id", None) is not None:
+        return
     event = _queue_status_to_notification_event(status)
     if event is None:
         return
@@ -1589,6 +1608,11 @@ def _record_download_queued(task_id: str, task: Any) -> None:
 
 def _record_download_terminal_snapshot(task_id: str, status: QueueStatus, task: Any) -> None:
     _notify_admin_for_terminal_download_status(task_id=task_id, status=status, task=task)
+    if wanted_scheduler is not None:
+        try:
+            wanted_scheduler.on_task_terminal(task_id, status, task)
+        except _OPERATIONAL_ERRORS as exc:
+            logger.warning("Wanted list could not handle the end of task %s: %s", task_id, exc)
 
     final_status = _queue_status_to_final_activity_status(status)
     if final_status is None:

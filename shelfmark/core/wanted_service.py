@@ -400,6 +400,17 @@ class WantedService:
             for row in rows
         }
 
+    def items_in_state(self, state: str) -> list[dict[str, Any]]:
+        """All items currently in ``state``."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM wanted_items WHERE state = ? ORDER BY id", (state,)
+            ).fetchall()
+            return [item for row in rows if (item := self._row_to_item(row))]
+        finally:
+            conn.close()
+
     def due_items(self, now: str, limit: int) -> list[dict[str, Any]]:
         """Waiting items whose next search is due, most overdue first."""
         conn = self._connect()

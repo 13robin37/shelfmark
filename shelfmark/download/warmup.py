@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
@@ -39,11 +40,21 @@ _warmup_lock = threading.Lock()
 # the bundle on issue #1276 that cost a full minute of a 2m27s wait, on a container 16
 # seconds old, for a throwaway "The Great Gatsby" query nobody asked for.
 _user_search_seen = threading.Event()
+_last_user_search_at: float | None = None
 
 
 def note_user_search() -> None:
     """Record that a real search has run, so a pending warm-up stands down."""
+    global _last_user_search_at
     _user_search_seen.set()
+    _last_user_search_at = time.monotonic()
+
+
+def seconds_since_user_search() -> float | None:
+    """Seconds since the last real search, or None if there has been none."""
+    if _last_user_search_at is None:
+        return None
+    return time.monotonic() - _last_user_search_at
 
 
 def _as_bool(value: object, *, default: bool) -> bool:

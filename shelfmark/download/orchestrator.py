@@ -252,6 +252,10 @@ def queue_release(
         request_id: int | None = None
         if isinstance(raw_request_id, int) and raw_request_id > 0:
             request_id = raw_request_id
+        raw_wanted_id = release_data.get("_wanted_id")
+        wanted_id: int | None = None
+        if isinstance(raw_wanted_id, int) and raw_wanted_id > 0:
+            wanted_id = raw_wanted_id
         search_mode = _parse_release_search_mode(release_data.get("search_mode"))
 
         # Get author, year, preview, and content_type from top-level (preferred) or extra (fallback)
@@ -328,6 +332,7 @@ def queue_release(
             user_id=user_id,
             username=username,
             request_id=request_id,
+            wanted_id=wanted_id,
             **retry_resolution_fields,
         )
 
@@ -687,6 +692,7 @@ def _task_to_dict(
         "user_id": task.user_id,
         "username": task.username,
         "request_id": task.request_id,
+        "wanted_id": task.wanted_id,
         "retry_available": can_retry_download_task(task, retry_status),
     }
 
