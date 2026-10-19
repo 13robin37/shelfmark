@@ -60,7 +60,11 @@ const ActionButton = ({
 const AttemptRow = ({ item, attempt }: { item: WantedItem; attempt: WantedAttempt }) => {
   const { isAdmin, unblockRelease } = useWanted();
   const block = describeAttemptBlock(attempt);
-  const details = [attempt.source, attempt.format?.toUpperCase(), attempt.size]
+  const details = [
+    attempt.source_label ?? attempt.source,
+    attempt.format?.toUpperCase(),
+    attempt.size,
+  ]
     .filter(Boolean)
     .join(' · ');
 
@@ -94,6 +98,7 @@ const AttemptRow = ({ item, attempt }: { item: WantedItem; attempt: WantedAttemp
 const WantedHistory = ({ item }: { item: WantedItem }) => {
   const { loadAttempts } = useWanted();
   const [attempts, setAttempts] = useState<WantedAttempt[] | null>(null);
+  const [failed, setFailed] = useState(false);
 
   // Reload whenever the item moves on, so new attempts and lifted blocks show.
   useDependencyEffect(() => {
@@ -102,11 +107,12 @@ const WantedHistory = ({ item }: { item: WantedItem }) => {
       .then((loaded) => {
         if (!cancelled) {
           setAttempts(loaded);
+          setFailed(false);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setAttempts([]);
+          setFailed(true);
         }
       });
     return () => {
@@ -114,6 +120,9 @@ const WantedHistory = ({ item }: { item: WantedItem }) => {
     };
   }, [item.id, item.state, item.attempt_count, item.last_result]);
 
+  if (failed) {
+    return <p className="mt-1 text-xs opacity-60">Could not load the history.</p>;
+  }
   if (attempts === null) {
     return <p className="mt-1 text-xs opacity-60">Loading history...</p>;
   }
@@ -207,7 +216,7 @@ const WantedRow = ({ item }: { item: WantedItem }) => {
           {item.subscribed && item.state !== 'obtained' && !editingLanguages && (
             <ActionButton label="Languages" onClick={() => setEditingLanguages(true)} />
           )}
-          {item.attempt_count > 0 && (
+          {(item.attempt_count > 0 || showHistory) && (
             <ActionButton
               label={showHistory ? 'Hide history' : 'History'}
               onClick={() => setShowHistory((shown) => !shown)}
@@ -247,6 +256,8 @@ export const WantedList = () => {
   const { items, loading, isAdmin, clearObtained } = useWanted();
   const [filter, setFilter] = useState<WantedFilter>('all');
   const [sort, setSort] = useState<WantedSort>('added');
+  // Deleting every user's obtained books is a bulk action; ask once more.
+  const [confirmingClear, setConfirmingClear] = useState(false);
 
   if (items.length === 0) {
     return (
@@ -292,13 +303,26 @@ export const WantedList = () => {
           }}
           widthClassName="w-40"
         />
-        {hasClearableObtained(items, isAdmin) && (
-          <ActionButton
-            label={isAdmin ? 'Delete obtained' : 'Remove obtained'}
-            tone="danger"
-            onClick={() => void clearObtained()}
-          />
-        )}
+        {hasClearableObtained(items, isAdmin) &&
+          (confirmingClear ? (
+            <span className="flex gap-3">
+              <ActionButton
+                label="Delete for everyone?"
+                tone="danger"
+                onClick={() => {
+                  setConfirmingClear(false);
+                  void clearObtained();
+                }}
+              />
+              <ActionButton label="Cancel" onClick={() => setConfirmingClear(false)} />
+            </span>
+          ) : (
+            <ActionButton
+              label={isAdmin ? 'Delete obtained' : 'Remove obtained'}
+              tone="danger"
+              onClick={() => (isAdmin ? setConfirmingClear(true) : void clearObtained())}
+            />
+          ))}
       </div>
       {visible.length === 0 ? (
         <p className="mt-6 text-center text-sm opacity-70">No books in this view.</p>

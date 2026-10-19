@@ -34,6 +34,7 @@ from shelfmark.core.utils import ARCHIVE_FORMATS
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
 from shelfmark.core.wanted_config import (
     backoff_hours,
+    format_order,
     format_wait,
     max_searches_per_hour,
     preferred_formats,
@@ -739,8 +740,8 @@ class WantedScheduler:
     @staticmethod
     def _format_hold(
         pending: list[dict[str, Any]], formats: tuple[str, ...]
-    ) -> tuple[int, datetime] | None:
-        """(rank a format must reach, until when) while subscribers wait for a good format."""
+    ) -> tuple[frozenset[str], str, datetime] | None:
+        """(good-enough formats, what is waited for, until when) while subscribers wait."""
         cutoff, days = format_wait()
         if days <= 0 or not formats:
             return None
@@ -751,13 +752,15 @@ class WantedScheduler:
         until = started + timedelta(days=days)
         if datetime.now(UTC) >= until:
             return None
-        rank = {fmt: index for index, fmt in enumerate(formats)}
-        return (rank.get(cutoff, 0) if cutoff else 0), until
-
-    @staticmethod
-    def _good_enough(release: Release, formats: tuple[str, ...], limit: int) -> bool:
-        rank = {fmt: index for index, fmt in enumerate(formats)}
-        return rank.get(_release_format(release), limit + 1) <= limit
+        order = format_order()
+        if cutoff is None or cutoff not in order:
+            return frozenset(formats[:1]), formats[0].upper(), until
+        # The cutoff may be a switched-off format; it still marks the line in the order.
+        good = frozenset(order[: order.index(cutoff) + 1]) & frozenset(formats)
+        if not good:
+            return None
+        label = cutoff.upper() if cutoff == formats[0] else f"{cutoff.upper()} or better"
+        return good, label, until
 
     def _hold_for_format(
         self, picked: list[Release], pending: list[dict[str, Any]], formats: tuple[str, ...]
@@ -766,14 +769,13 @@ class WantedScheduler:
         hold = self._format_hold(pending, formats) if picked else None
         if hold is None:
             return picked, None
-        limit, until = hold
-        good = [release for release in picked if self._good_enough(release, formats, limit)]
+        good_formats, label, until = hold
+        good = [release for release in picked if _release_format(release) in good_formats]
         if good:
             return good, None
         found = sorted({_release_format(release).upper() or "unknown format" for release in picked})
         message = (
-            f"Only {', '.join(found)} found; waiting for {formats[limit].upper()} "
-            f"until {until.date().isoformat()}"
+            f"Only {', '.join(found)} found; waiting for {label} until {until.date().isoformat()}"
         )
         return [], _FormatHold(until=until, message=message)
 
@@ -807,10 +809,9 @@ class WantedScheduler:
             else:
                 reason = rejection_reason(release, item["book_data"], prefs, blocked)
             if reason is None and hold is not None:
-                limit, until = hold
-                if not self._good_enough(release, prefs.preferred_formats, limit):
-                    wanted = prefs.preferred_formats[limit].upper()
-                    reason = f"Waiting for {wanted} until {until.date().isoformat()}"
+                good_formats, label, until = hold
+                if _release_format(release) not in good_formats:
+                    reason = f"Waiting for {label} until {until.date().isoformat()}"
             reasons[f"{release.source}:{release.source_id}"] = reason
         return reasons
 
@@ -1029,9 +1030,9 @@ class WantedScheduler:
             content_type=WANTED_CONTENT_TYPE,
             detail=get_source_display_name(release.source),
         )
-        user_ids = {
-            _positive_int(sub.get("user_id")) for sub in self._pending_subscribers(item["id"])
-        }
+        # Only those this source may serve get this download.
+        receivers = self._users_allowed(self._pending_subscribers(item["id"]), release.source)
+        user_ids = {_positive_int(sub.get("user_id")) for sub in receivers}
         try:
             notify_admin(NotificationEvent.WANTED_GRABBED, context)
             for user_id in user_ids - {None}:

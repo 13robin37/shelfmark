@@ -567,12 +567,14 @@ export interface WantedAttempt {
   id: number;
   cycle: number;
   source: string;
+  source_label?: string;
   release_title: string | null;
   format: string | null;
   size: string | null;
   indexer?: string | null;
   status: WantedAttemptStatus;
-  error_message: string | null;
+  /** Only admins see error text; it can name trackers or carry download URLs. */
+  error_message?: string | null;
   created_at: string | null;
   finished_at: string | null;
   blocked: boolean;

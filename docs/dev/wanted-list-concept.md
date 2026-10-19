@@ -434,6 +434,21 @@ Abgleich mit Readarr (Vormerken und Herunterladen) und die gewählten Erweiterun
 | 10 | Benachrichtigungen | Neu: „Release gefunden, wird geladen“, einmal pro Suchdurchgang. |
 | + | Anfragen | Beim Genehmigen einer Anfrage kann der Admin sie auf die Merkliste setzen; die Vormerkung gilt für den anfragenden Nutzer. |
 
+Schnittstellen und Einstellungen dazu:
+
+- `GET /api/wanted/<id>/attempts` liefert pro Versuch `blocked`, `blocked_until` und `source_label`
+  (Fehlertexte nur für Admins); `DELETE /api/wanted/<id>/attempts/<attempt_id>/block` (Admin) gibt
+  einen Release wieder frei.
+- `PATCH /api/wanted/<id>` mit `languages` ändert die Sprachen des eigenen Abos (höchstens 20 Codes);
+  nur eine echte Änderung macht den Eintrag sofort fällig.
+- `DELETE /api/wanted/obtained` entfernt erhaltene Bücher (Nutzer: eigene Abos, Admin: alle).
+- `POST /api/wanted/<id>/evaluate` (Gründe pro Release) und `POST /api/wanted/<id>/grab`
+  (Release für die Merkliste laden).
+- Einstellungen `WANTED_FORMAT_CUTOFF` (auch ein abgeschaltetes Format markiert die Grenze in der
+  Reihenfolge) und `WANTED_FORMAT_WAIT_DAYS` (Standard 0).
+- Benachrichtigung `wanted_grabbed` („Bookmarked book found“) nur an Vormerker, die diese Quelle
+  nutzen dürfen.
+
 Bewusst nicht übernommen: Qualitäts-Upgrades bereits zugestellter Bücher, Wortlisten und Scoring,
 Kalenderseite, Umbenennen/Import (übernehmen Shelfmarks Ausgabemodi), Hörbücher.
 

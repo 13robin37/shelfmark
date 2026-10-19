@@ -365,9 +365,17 @@ def register_wanted_routes(
             return gate
         if _item_for_viewer(wanted_id, viewer_id, is_admin) is None:
             return _error("Wanted item not found", 404)
+        from shelfmark.release_sources import get_source_display_name
+
         attempts = wanted_service.list_attempts(wanted_id)
+        labels = {
+            source: get_source_display_name(source) for source in {a["source"] for a in attempts}
+        }
+        for attempt in attempts:
+            attempt["source_label"] = labels[attempt["source"]]
         if not is_admin:
-            hidden = {"source_id", "match_key", "indexer"}
+            # Error text can name trackers or carry download URLs.
+            hidden = {"source_id", "match_key", "indexer", "error_message"}
             attempts = [
                 {key: value for key, value in attempt.items() if key not in hidden}
                 for attempt in attempts

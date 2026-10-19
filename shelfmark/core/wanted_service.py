@@ -36,6 +36,8 @@ BLOCK_AFTER_FAILED_CYCLES = 2
 BLOCK_EXPIRY_DAYS = 30
 
 MAX_BOOK_DATA_BYTES = 10 * 1024
+_MAX_LANGUAGES = 20
+_MAX_LANGUAGE_LENGTH = 16
 
 _BOOK_DATA_KEYS = (
     "title",
@@ -145,7 +147,10 @@ def _normalize_languages(languages: object) -> list[str] | None:
     if not isinstance(languages, list) or not all(isinstance(code, str) for code in languages):
         msg = "languages must be a list of language codes"
         raise WantedServiceError(msg)
-    cleaned = [code.strip() for code in languages if code.strip()]
+    cleaned = list(dict.fromkeys(code.strip() for code in languages if code.strip()))
+    if len(cleaned) > _MAX_LANGUAGES or any(len(code) > _MAX_LANGUAGE_LENGTH for code in cleaned):
+        msg = f"At most {_MAX_LANGUAGES} language codes are allowed"
+        raise WantedServiceError(msg)
     return cleaned or None
 
 
@@ -754,9 +759,14 @@ class WantedService:
         conn: sqlite3.Connection, wanted_id: int, subscriber_id: int, languages: list[str] | None
     ) -> None:
         now = now_utc_iso()
+        stored = json.dumps(languages) if languages else None
+        current = conn.execute(
+            "SELECT languages FROM wanted_subscribers WHERE id = ?", (subscriber_id,)
+        ).fetchone()
+        if current is not None and current["languages"] == stored:
+            return
         conn.execute(
-            "UPDATE wanted_subscribers SET languages = ? WHERE id = ?",
-            (json.dumps(languages) if languages else None, subscriber_id),
+            "UPDATE wanted_subscribers SET languages = ? WHERE id = ?", (stored, subscriber_id)
         )
         # Other languages may find what the last searches did not.
         conn.execute(

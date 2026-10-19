@@ -611,7 +611,12 @@ def _emit_wanted_update(wanted_id: int | None) -> None:
         return
     try:
         if wanted_id is None:
-            user_ids = wanted_service.all_subscriber_ids()
+            # Bulk changes may have removed users' bookmarks; tell everyone to reload.
+            user_ids = (
+                {user["id"] for user in user_db.list_users()}
+                if user_db is not None
+                else wanted_service.all_subscriber_ids()
+            )
         else:
             user_ids = {
                 sub["user_id"]

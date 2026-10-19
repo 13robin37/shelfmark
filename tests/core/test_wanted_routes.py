@@ -114,9 +114,11 @@ def test_attempts_hide_release_identities_from_non_admins(env):
         size="1 MB",
         indexer="tracker",
     )
+    service.finish_attempt(item_id, "12:https://tracker/torrent/1", "error", "tracker said no")
 
     attempt = client.get(f"/api/wanted/{item_id}/attempts").get_json()["attempts"][0]
-    assert {"source_id", "indexer", "match_key"}.isdisjoint(attempt)
+    assert {"source_id", "indexer", "match_key", "error_message"}.isdisjoint(attempt)
+    assert attempt["source_label"]
     _login(env, env["admin"], is_admin=True)
     admin_attempt = client.get(f"/api/wanted/{item_id}/attempts").get_json()["attempts"][0]
     assert admin_attempt["source_id"] == "12:https://tracker/torrent/1"

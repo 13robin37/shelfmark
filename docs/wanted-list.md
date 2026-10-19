@@ -6,9 +6,9 @@ Bookmark an ebook that is not available yet, and Shelfmark downloads it on its o
 
 - Click the **eye** on a search result, in the book details or in the release dialog to bookmark a book. Click it again to remove your bookmark. Once nobody wants a book any more, a download still running for it is cancelled.
 - The **Wanted** tab in the activity sidebar lists your bookmarks with their state, the last search result and when the next search runs. Filter it by state, sort it, and clear obtained books. **Search now** runs a search at the next opportunity.
-- **History** shows every release tried for a book, why it failed and whether it is blocked.
+- **History** shows every release tried for a book and whether it is blocked; admins also see why it failed.
 - **Languages** sets the languages you want a book in; bookmarking from the release dialog takes its language filter. Changing them searches again right away.
-- Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases (all at once, or one with **Allow again** in the history) or delete an entry for everyone.
+- Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases (all at once, or one with **Allow again** in the history; both drop those entries from the history) or delete an entry for everyone.
 
 - In the release dialog of a book you bookmarked, each release the wanted list would pass over says why (another volume, wrong format, failed before, ...). Downloading a release there while the bookmark waits counts for the bookmark: it is delivered to everyone who bookmarked the book, like a release the wanted list found itself.
 

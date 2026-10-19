@@ -989,7 +989,7 @@ def test_the_wait_for_a_format_ends(env):
     env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
     env.add()
     with (
-        patch.object(ws, "format_wait", return_value=("mobi", 7.0)),
+        patch.object(ws, "format_wait", return_value=(None, 7.0)),
         patch.object(
             env.service,
             "list_subscribers",
@@ -1106,3 +1106,67 @@ def test_releases_from_the_frontend_are_validated():
     assert release.extra == {}
     assert ws.release_from_dict({"source": "libgen", "title": "Dune"}) is None
     assert ws.release_from_dict(["nope"]) is None
+
+
+def test_a_switched_off_cutoff_still_marks_the_line(env):
+    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
+    with (
+        patch.object(ws, "format_wait", return_value=("pdf", 7.0)),
+        patch.object(ws, "format_order", return_value=("epub", "mobi", "pdf")),
+    ):
+        env.add()
+        env.scheduler.tick()
+
+    assert env.queued[-1][0]["source_id"] == "aa-mobi"
+
+
+def test_the_next_search_comes_no_later_than_the_wait_ends(env):
+    from datetime import UTC, datetime, timedelta
+
+    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, backoff_level=2)
+    # Bookmarked long enough ago that the 7-day wait ends in about two hours.
+    joined = (datetime.now(UTC) - timedelta(days=7) + timedelta(hours=2)).isoformat()
+    subscriber = {**env.service.list_subscribers(wanted_id)[0], "created_at": joined}
+    with (
+        patch.object(ws, "format_wait", return_value=(None, 7.0)),
+        patch.object(env.service, "list_subscribers", return_value=[subscriber]),
+    ):
+        env.scheduler.tick()
+
+    next_search = datetime.fromisoformat(env.item(wanted_id)["next_search_at"])
+    assert next_search <= datetime.now(UTC) + timedelta(hours=2, minutes=1)
+
+
+def test_the_found_notice_skips_subscribers_the_source_cannot_serve(env):
+    env.policy = {
+        "REQUESTS_ENABLED": True,
+        "REQUEST_POLICY_DEFAULT_EBOOK": "download",
+        "REQUEST_POLICY_RULES": [
+            {"source": "direct_download", "content_type": "ebook", "mode": "request_release"}
+        ],
+    }
+    env.user_db.set_user_settings(
+        env.bob["id"],
+        {
+            "REQUEST_POLICY_RULES": [
+                {"source": "direct_download", "content_type": "ebook", "mode": "download"}
+            ]
+        },
+    )
+    sent: list[int | None] = []
+    with (
+        patch("shelfmark.core.notifications.notify_admin"),
+        patch(
+            "shelfmark.core.notifications.notify_user",
+            side_effect=lambda user_id, *_a: sent.append(user_id),
+        ),
+        patch("shelfmark.release_sources.get_source_display_name", return_value="AA"),
+    ):
+        env.add()
+        env.add(user=env.bob)
+        env.scheduler.tick()
+
+    assert env.queued[-1][0]["source"] == "direct_download"
+    assert sent == [env.bob["id"]]

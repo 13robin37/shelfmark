@@ -67,6 +67,12 @@ def preferred_formats() -> tuple[tuple[str, ...], frozenset[str]]:
     return order, excluded
 
 
+def format_order() -> tuple[str, ...]:
+    """Every format of WANTED_PREFERRED_FORMATS in order, switched off or not."""
+    entries = _ordered_entries(config.get("WANTED_PREFERRED_FORMATS"), default_format_order())
+    return tuple(entry["id"].lower() for entry in entries)
+
+
 def format_wait() -> tuple[str | None, float]:
     """(format a release must reach while waiting, days to wait for it); 0 days is off.
 

@@ -261,10 +261,7 @@ export function WantedProvider({
           `Failed and cancelled releases of "${item.title}" may be tried again`,
         ),
       setLanguages: (item, languages) =>
-        run(
-          () => setWantedLanguages(item.id, languages),
-          `Searching for "${item.title}" in the new languages`,
-        ),
+        run(() => setWantedLanguages(item.id, languages), `Languages saved for "${item.title}"`),
       clearObtained: () => run(() => clearObtainedWanted(), 'Removed obtained books'),
       loadAttempts: (item) => getWantedAttempts(item.id),
       unblockRelease: (item, attempt) =>

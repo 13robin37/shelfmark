@@ -397,3 +397,20 @@ def test_clearing_obtained_books(service, users):
     service.clear_obtained(None, everyone=True)
     assert service.get_item(shared["id"]) is None
     assert service.get_item(waiting["id"]) is not None
+
+
+def test_saving_the_same_languages_does_not_search_again(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book(), languages=["en"])
+    service.update_item(item["id"], next_search_at="2999-01-01T00:00:00+00:00", backoff_level=2)
+
+    service.set_languages(item["id"], users[0]["id"], ["en"])
+
+    assert service.get_item(item["id"])["backoff_level"] == 2
+
+
+def test_language_lists_are_bounded(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+    with pytest.raises(WantedServiceError):
+        service.set_languages(item["id"], users[0]["id"], [f"l{index}" for index in range(21)])
+    with pytest.raises(WantedServiceError):
+        service.set_languages(item["id"], users[0]["id"], ["x" * 17])
