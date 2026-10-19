@@ -15,12 +15,12 @@ The eye only appears for ebooks from a metadata provider, and only for users who
 
 ## Series, authors and lists
 
-Search Hardcover by a series, an author or one of your lists (pick it from the suggestions). Above the results:
+Search Hardcover by a series, an author or a list (pick it from the suggestions). Lists and reading statuses such as "Want to Read" are those of the Hardcover account whose API key Shelfmark uses. Above the results:
 
-- **Bookmark all missing** bookmarks every book shown that is not in your library yet (up to 200).
-- **Watch for new books** remembers the books there now and bookmarks every book added later: a new volume of a series, a new book by the author, a book you put on your Hardcover list. Watches are checked every 6 hours and listed under **Watching** in the Wanted tab.
+- **Bookmark all missing** bookmarks every book shown that is not in the library yet (up to 200).
+- **Watch for new books** remembers the books there now (up to 1000) and bookmarks every book added later: a new volume of a series, a new book by the author, a book put on the list. Watches are checked every 6 hours and listed under **Watching** in the Wanted tab. If Hardcover cannot be read when you start watching, the first successful check sets the starting point instead, so nothing old gets bookmarked by mistake. Authors with very many books are read most popular first, so beyond 1000 a new book can go unnoticed.
 
-Admins can watch for another user (**For …**), for example their Hardcover "Want to Read" list for a family member; those bookmarks download even if that user would otherwise have to request.
+Admins can do both **For** another user, for example to bookmark the books on the Hardcover "Want to Read" list for a family member. Those bookmarks download even if that user would otherwise have to request, as long as the approving admin stays an admin. Anyone who can add books to a watched Hardcover list can then get books downloaded that way, so only watch lists you control for others.
 
 ## Requests
 

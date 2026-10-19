@@ -627,6 +627,7 @@ export interface WantedWatch extends WantedWatchTarget {
 
 export interface WantedBulkResult {
   bookmarked: number;
+  already: number;
   in_library: number;
   failed: number;
 }

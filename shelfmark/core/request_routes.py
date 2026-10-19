@@ -1024,7 +1024,7 @@ def register_request_routes(
     def api_admin_request_to_wanted(request_id: int) -> ResponseReturnValue:
         """Approve a book request by putting it on the wanted list for the requester."""
         from shelfmark.core.wanted_config import wanted_enabled
-        from shelfmark.core.wanted_service import WantedServiceError
+        from shelfmark.core.wanted_service import WantedServiceError, normalize_book_data
 
         auth_gate = _require_request_endpoints_available(resolve_auth_mode)
         if auth_gate is not None:
@@ -1048,15 +1048,11 @@ def register_request_routes(
         if request_row.get("content_type") != "ebook" or request_row.get("release_data"):
             # A request for one particular release is approved by downloading it.
             return _error_response("Only book requests for ebooks can go on the wanted list", 400)
-        book_data = request_row.get("book_data")
+        raw_book = request_row.get("book_data")
         try:
-            item, _created = wanted_service.add(
-                user_id=request_row["user_id"],
-                book_data={
-                    **(book_data if isinstance(book_data, dict) else {}),
-                    "content_type": "ebook",
-                },
-                approved_by=admin_user_id,
+            # Checked before the request changes, so a bad book cannot leave it half done.
+            book_data = normalize_book_data(
+                {**(raw_book if isinstance(raw_book, dict) else {}), "content_type": "ebook"}
             )
         except WantedServiceError as exc:
             return _error_response(str(exc), exc.status_code)
@@ -1075,6 +1071,10 @@ def register_request_routes(
             )
         except RequestServiceError as exc:
             return _error_response(str(exc), exc.status_code, code=exc.code)
+        # Only now: a request cancelled or decided meanwhile must not leave a bookmark.
+        item, _created = wanted_service.add(
+            user_id=request_row["user_id"], book_data=book_data, approved_by=admin_user_id
+        )
         if on_wanted_change is not None:
             on_wanted_change(item["id"])
         return _announce_fulfilled(updated, admin_user_id)

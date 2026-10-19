@@ -36,27 +36,54 @@ def test_a_valid_watch_is_normalized():
     )
 
 
-def test_books_are_read_page_by_page_up_to_the_cap(monkeypatch):
-    monkeypatch.setattr(wanted_watches, "MAX_WATCH_BOOKS", 3)
-    pages = {
-        1: SimpleNamespace(books=[_book("1"), _book("2")], has_more=True),
-        2: SimpleNamespace(books=[_book("3"), _book("4")], has_more=True),
-    }
-    calls = []
+class _Provider:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
 
-    class _Provider:
-        def search_paginated(self, options):
-            calls.append((options.page, options.fields))
-            return pages[options.page]
+    def search_paginated(self, options):
+        self.calls.append((options.page, options.fields))
+        return self.pages.get(
+            options.page, SimpleNamespace(books=[], has_more=False, total_found=0)
+        )
 
+
+def _fetch(provider, limit=3):
     with (
-        patch("shelfmark.metadata_providers.get_provider", return_value=_Provider()),
+        patch("shelfmark.metadata_providers.get_provider", return_value=provider),
         patch("shelfmark.metadata_providers.get_provider_kwargs", return_value={}),
+        patch("shelfmark.metadata_providers.is_provider_enabled", return_value=True),
     ):
-        books = wanted_watches.fetch_watch_books("hardcover", {"series": "id:9"})
+        return wanted_watches.fetch_watch_books("hardcover", {"series": "id:9"}, limit)
+
+
+def test_books_are_read_page_by_page_up_to_the_cap():
+    provider = _Provider(
+        {
+            1: SimpleNamespace(books=[_book("1"), _book("2")], has_more=True, total_found=4),
+            2: SimpleNamespace(books=[_book("3"), _book("4")], has_more=True, total_found=4),
+        }
+    )
+
+    books, total = _fetch(provider)
 
     assert [book.provider_id for book in books] == ["1", "2", "3"]
-    assert calls == [(1, {"series": "id:9"}), (2, {"series": "id:9"})]
+    assert total == 4
+    assert provider.calls == [(1, {"series": "id:9"}), (2, {"series": "id:9"})]
+
+
+def test_a_page_failing_part_way_is_an_error_not_an_end():
+    provider = _Provider({1: SimpleNamespace(books=[_book("1")], has_more=True, total_found=5)})
+    with pytest.raises(wanted_watches.WatchFetchError):
+        _fetch(provider, limit=10)
+
+
+def test_a_provider_that_is_off_cannot_be_read():
+    with (
+        patch("shelfmark.metadata_providers.is_provider_enabled", return_value=False),
+        pytest.raises(wanted_watches.WatchFetchError),
+    ):
+        wanted_watches.fetch_watch_books("hardcover", {"series": "id:9"})
 
 
 def test_a_book_becomes_bookmark_data():

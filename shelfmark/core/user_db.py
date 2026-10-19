@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS wanted_subscribers (
     languages        TEXT,
     delivered_at     TIMESTAMP,
     delivery_task_id TEXT,
-    approved_by      INTEGER,
+    approved_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS wanted_watches (
     provider       TEXT NOT NULL,
     fields         TEXT NOT NULL,
     label          TEXT NOT NULL,
-    approved_by    INTEGER,
+    approved_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     seen           TEXT,
     last_synced_at TIMESTAMP,
     last_result    TEXT,
@@ -360,7 +360,10 @@ class UserDB:
         columns = conn.execute("PRAGMA table_info(wanted_subscribers)").fetchall()
         column_names = {str(col["name"]) for col in columns}
         if "approved_by" not in column_names:
-            conn.execute("ALTER TABLE wanted_subscribers ADD COLUMN approved_by INTEGER")
+            conn.execute(
+                "ALTER TABLE wanted_subscribers ADD COLUMN approved_by INTEGER "
+                "REFERENCES users(id) ON DELETE SET NULL"
+            )
 
     def _migrate_download_history_downloads(self, conn: sqlite3.Connection) -> None:
         """Ensure download_history.downloads exists for download count persistence."""

@@ -74,7 +74,7 @@ interface WantedContextValue {
   /** Download a picked release for the wanted list; false if it could not be queued. */
   grab: (wantedId: number, release: Release, title: string) => Promise<boolean>;
   /** Bookmark every book of a series, author or list not in the library yet. */
-  bookmarkAll: (target: WantedWatchTarget) => Promise<void>;
+  bookmarkAll: (target: WantedWatchTarget, userId?: number | null) => Promise<void>;
   /** Bookmark new books of a series, author or list as they appear. */
   watch: (target: WantedWatchTarget, userId?: number | null) => Promise<void>;
   unwatch: (watch: WantedWatch) => Promise<void>;
@@ -303,11 +303,16 @@ export function WantedProvider({
         }, `Downloading "${title}" for the wanted list`);
         return queued;
       },
-      bookmarkAll: (target) =>
+      bookmarkAll: (target, userId) =>
         run(async () => {
-          const result = await bookmarkAllForWanted(target);
-          const skipped =
-            result.in_library > 0 ? `; ${result.in_library} already in the library` : '';
+          const result = await bookmarkAllForWanted(target, userId);
+          const skipped = [
+            result.already > 0 ? `${result.already} already bookmarked` : null,
+            result.in_library > 0 ? `${result.in_library} already in the library` : null,
+          ]
+            .filter(Boolean)
+            .map((part) => `; ${part}`)
+            .join('');
           onShowToast(
             `Bookmarked ${result.bookmarked} book(s) of ${target.label}${skipped}`,
             'success',

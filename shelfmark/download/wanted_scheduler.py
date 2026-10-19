@@ -403,6 +403,8 @@ class WantedScheduler:
     def _sync_watch(self) -> None:
         """Bookmark what is new in the watched series, author or list synced longest ago."""
         from shelfmark.core.wanted_watches import (
+            MAX_WATCH_BOOKS,
+            WatchFetchError,
             book_data_from_metadata,
             book_key,
             fetch_watch_books,
@@ -412,23 +414,47 @@ class WantedScheduler:
         watch = self._service.due_watch(synced_before)
         if watch is None:
             return
-        owner = {"user_id": watch.get("user_id"), "approved_by": watch.get("approved_by")}
-        allowed = any(self._users_allowed([owner], source) for source in self._available_sources())
-        try:
-            books = fetch_watch_books(watch["provider"], watch["fields"]) if allowed else []
-        except Exception as exc:  # noqa: BLE001 - a provider outage must not stop the tick
-            logger.warning("Wanted: could not read %s: %s", watch["label"], exc)
+
+        def done(result: str, seen: list[str] | None = watch["seen"]) -> None:
             self._service.update_watch(
-                watch["id"],
-                seen=watch["seen"],
-                last_result=f"Could not read it: {exc}",
-                synced_at=now_utc_iso(),
+                watch["id"], seen=seen, last_result=result, synced_at=now_utc_iso()
             )
+
+        sources = self._available_sources()
+        owner = {"user_id": watch.get("user_id"), "approved_by": watch.get("approved_by")}
+        if not sources:
+            done("No wanted-list source is available")
+            return
+        if not any(self._users_allowed([owner], source) for source in sources):
+            done("Not allowed to download from any wanted-list source")
+            return
+        try:
+            books, total = fetch_watch_books(watch["provider"], watch["fields"])
+        except (WatchFetchError, OSError, RuntimeError, ValueError) as exc:
+            logger.warning("Wanted: could not read %s: %s", watch["label"], exc)
+            done(f"Could not read it: {exc}")
+            return
+        capped = (
+            f"; only the first {MAX_WATCH_BOOKS} of {total} are watched"
+            if (total > len(books))
+            else ""
+        )
+        keys = [book_key(book) for book in books]
+        if watch["seen"] is None:
+            # Nothing was read when the watch was made: what is there now is the start.
+            if books:
+                done(f"Watching {len(books)} book(s){capped}", sorted(keys))
+            else:
+                done("No books found yet")
+            return
+        if not books:
+            # An empty answer is more often an outage than a list emptied out.
+            done("No books found; will look again")
             return
         seen = set(watch["seen"])
         added = 0
-        for book in books:
-            if book_key(book) in seen:
+        for book, key in zip(books, keys, strict=True):
+            if key in seen:
                 continue
             try:
                 self._service.add(
@@ -436,19 +462,14 @@ class WantedScheduler:
                     book_data=book_data_from_metadata(book),
                     approved_by=watch.get("approved_by"),
                 )
-                added += 1
-            except (ValueError, RuntimeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - one book must not stop the others
+                # Not marked as seen, so the next sync tries it again.
                 logger.warning("Wanted: could not bookmark %s: %s", book.title, exc)
-        if not allowed:
-            result = "Not allowed to download from any wanted-list source"
-        else:
-            result = f"Bookmarked {added} new book(s)" if added else "Nothing new"
-        self._service.update_watch(
-            watch["id"],
-            seen=sorted(seen | {book_key(book) for book in books}),
-            last_result=result,
-            synced_at=now_utc_iso(),
-        )
+                continue
+            seen.add(key)
+            added += 1
+        result = f"Bookmarked {added} new book(s)" if added else "Nothing new"
+        done(f"{result}{capped}", sorted(seen))
         if added:
             logger.info("Wanted: %s - bookmarked %d new book(s)", watch["label"], added)
             self._changed(None)
@@ -716,9 +737,17 @@ class WantedScheduler:
         return [
             sub
             for sub in subscribers
-            if sub.get("approved_by")
+            if self._approved_by_admin(sub.get("approved_by"))
             or user_may_download(self._user_db, sub.get("user_id"), source, auth_mode=auth_mode)
         ]
+
+    def _approved_by_admin(self, approver_id: object) -> bool:
+        """Whether an approval still holds: its admin still exists and is still an admin."""
+        user_id = _positive_int(approver_id)
+        if user_id is None or self._user_db is None:
+            return False
+        approver = self._user_db.get_user(user_id=user_id)
+        return approver is not None and approver.get("role") == "admin"
 
     @staticmethod
     def _search_languages(subscribers: list[dict[str, Any]]) -> list[str] | None:

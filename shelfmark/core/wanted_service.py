@@ -882,7 +882,8 @@ class WantedService:
         watch = dict(row)
         watch["fields"] = _load_json(watch.get("fields")) or {}
         seen = _load_json(watch.get("seen"))
-        watch["seen"] = seen if isinstance(seen, list) else []
+        # None: no books read yet; the first sync that reads some takes them as the start.
+        watch["seen"] = seen if isinstance(seen, list) else None
         return watch
 
     def add_watch(
@@ -892,8 +893,9 @@ class WantedService:
         provider: str,
         fields: dict[str, str],
         label: str,
-        seen: list[str],
+        seen: list[str] | None,
         approved_by: int | None = None,
+        last_result: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Watch a series, author or list for ``user_id``; seen books are not bookmarked.
 
@@ -910,17 +912,29 @@ class WantedService:
                     (user_id, provider, encoded),
                 ).fetchone()
                 if existing is not None:
+                    if approved_by is not None and existing["approved_by"] != approved_by:
+                        # An admin asking again for this user's watch approves it.
+                        conn.execute(
+                            "UPDATE wanted_watches SET approved_by = ? WHERE id = ?",
+                            (approved_by, existing["id"]),
+                        )
+                        conn.commit()
+                        existing = conn.execute(
+                            "SELECT * FROM wanted_watches WHERE id = ?", (existing["id"],)
+                        ).fetchone()
                     return self._row_to_watch(existing), False
                 cursor = conn.execute(
                     "INSERT INTO wanted_watches (user_id, provider, fields, label, approved_by, "
-                    "seen, last_synced_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "seen, last_result, last_synced_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         user_id,
                         provider,
                         encoded,
                         label[:200],
                         approved_by,
-                        json.dumps(seen),
+                        json.dumps(seen) if seen is not None else None,
+                        last_result,
                         now,
                         now,
                     ),
@@ -987,7 +1001,7 @@ class WantedService:
             conn.close()
 
     def update_watch(
-        self, watch_id: int, *, seen: list[str], last_result: str, synced_at: str
+        self, watch_id: int, *, seen: list[str] | None, last_result: str, synced_at: str
     ) -> None:
         """Record a sync of a watch."""
         with self._lock:
@@ -996,7 +1010,12 @@ class WantedService:
                 conn.execute(
                     "UPDATE wanted_watches SET seen = ?, last_result = ?, last_synced_at = ? "
                     "WHERE id = ?",
-                    (json.dumps(seen), last_result, synced_at, watch_id),
+                    (
+                        json.dumps(seen) if seen is not None else None,
+                        last_result,
+                        synced_at,
+                        watch_id,
+                    ),
                 )
                 conn.commit()
             finally:

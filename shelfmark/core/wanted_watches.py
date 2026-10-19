@@ -21,13 +21,19 @@ _WATCH_FIELD_VALUES: dict[str, re.Pattern[str]] = {
     "hardcover_list": re.compile(r"^(id|status):\d+$"),
 }
 WATCH_PROVIDERS = frozenset({"hardcover"})
-# Books read per watch or bulk bookmark: series, authors and reading lists stay below.
-MAX_WATCH_BOOKS = 200
+# Books a watch keeps track of; past that, books added later may go unnoticed.
+MAX_WATCH_BOOKS = 1000
+# Books bookmarked at once by "Bookmark all missing".
+MAX_BULK_BOOKS = 200
 _PAGE_SIZE = 40
 
 
 class WatchError(ValueError):
     """A series, author or list that cannot be watched."""
+
+
+class WatchFetchError(RuntimeError):
+    """The provider did not return the books completely."""
 
 
 def normalize_watch(provider: object, fields: object) -> tuple[str, dict[str, str]]:
@@ -51,26 +57,46 @@ def book_key(book: BookMetadata) -> str:
     return f"{book.provider}:{book.provider_id}"
 
 
-def fetch_watch_books(provider: str, fields: dict[str, str]) -> list[BookMetadata]:
-    """The books a series, author or list holds now (up to MAX_WATCH_BOOKS)."""
+def fetch_watch_books(
+    provider: str, fields: dict[str, str], limit: int = MAX_WATCH_BOOKS
+) -> tuple[list[BookMetadata], int]:
+    """The books a series, author or list holds now (up to ``limit``), and how many it has.
+
+    Raises:
+        WatchFetchError: The provider is off, or stopped answering part way through.
+
+    """
     from shelfmark.metadata_providers import (
         MetadataSearchOptions,
         get_provider,
         get_provider_kwargs,
+        is_provider_enabled,
     )
 
+    if not is_provider_enabled(provider):
+        msg = f"{provider.title()} is not set up"
+        raise WatchFetchError(msg)
     source = get_provider(provider, **get_provider_kwargs(provider))
     books: list[BookMetadata] = []
+    total = 0
     page = 1
-    while len(books) < MAX_WATCH_BOOKS:
+    while len(books) < limit:
         result = source.search_paginated(
             MetadataSearchOptions(query="", fields=dict(fields), page=page, limit=_PAGE_SIZE)
         )
+        total = max(total, result.total_found)
+        if not result.books:
+            # Providers report failures as empty pages; an empty page short of the
+            # announced total is one.
+            if total > len(books):
+                msg = f"{provider.title()} returned {len(books)} of {total} books"
+                raise WatchFetchError(msg)
+            break
         books.extend(result.books)
-        if not result.has_more or not result.books:
+        if not result.has_more:
             break
         page += 1
-    return books[:MAX_WATCH_BOOKS]
+    return books[:limit], max(total, len(books))
 
 
 def book_data_from_metadata(book: BookMetadata) -> dict[str, Any]:

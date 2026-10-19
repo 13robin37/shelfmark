@@ -1359,7 +1359,7 @@ def test_a_watch_bookmarks_only_books_it_has_not_seen(env):
         BookMetadata(provider="hardcover", provider_id="1", title="Dune"),
         BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah"),
     ]
-    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=books):
+    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=(books, 2)):
         env.scheduler._sync_watch()
         env.scheduler._sync_watch()
 
@@ -1377,7 +1377,9 @@ def test_a_watch_of_someone_without_rights_bookmarks_nothing(env):
     )
     env.service.update_watch(1, seen=[], last_result="", synced_at="2000")
     book = BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah")
-    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=[book]) as fetch:
+    with patch(
+        "shelfmark.core.wanted_watches.fetch_watch_books", return_value=([book], 1)
+    ) as fetch:
         env.scheduler._sync_watch()
 
     fetch.assert_not_called()
@@ -1392,3 +1394,46 @@ def test_an_approved_bookmark_downloads_for_someone_who_must_request(env):
     env.scheduler.tick()
 
     assert env.queued[-1][1] == env.alice["id"]
+
+
+def test_a_watch_made_during_an_outage_takes_its_first_read_as_the_start(env):
+    watch, _ = env.service.add_watch(
+        user_id=env.alice["id"],
+        provider="hardcover",
+        fields={"series": "id:1"},
+        label="D",
+        seen=None,
+    )
+    env.service.update_watch(watch["id"], seen=None, last_result="", synced_at="2000")
+    books = [BookMetadata(provider="hardcover", provider_id=str(n), title="Dune") for n in (1, 2)]
+    with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=(books, 2)):
+        env.scheduler._sync_watch()
+
+    assert env.service.list_items(user_id=env.alice["id"], include_all=False) == []
+    assert env.service.get_watch(watch["id"])["seen"] == ["hardcover:1", "hardcover:2"]
+
+
+def test_a_book_that_could_not_be_bookmarked_is_tried_again(env):
+    watch, _ = env.service.add_watch(
+        user_id=env.alice["id"], provider="hardcover", fields={"series": "id:1"}, label="D", seen=[]
+    )
+    env.service.update_watch(watch["id"], seen=[], last_result="", synced_at="2000")
+    book = BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah")
+    with (
+        patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=([book], 1)),
+        patch.object(env.service, "add", side_effect=RuntimeError("db busy")),
+    ):
+        env.scheduler._sync_watch()
+
+    assert env.service.get_watch(watch["id"])["seen"] == []
+
+
+def test_an_approval_ends_when_its_admin_is_no_admin_any_more(env):
+    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+    admin = env.user_db.create_user(username="root", role="admin")
+    env.service.add(user_id=env.alice["id"], book_data=BOOK, approved_by=admin["id"])
+    env.user_db.update_user(admin["id"], role="user")
+
+    env.scheduler.tick()
+
+    assert env.queued == []

@@ -257,8 +257,12 @@ export const isWatchedTarget = (watch: WantedWatchTarget, target: WantedWatchTar
   );
 };
 
-const WATCH_FIELD_VALUE = /^(id|status):\d+$/;
-const WATCH_FIELDS = new Set(['series', 'author', 'hardcover_list']);
+// Values naming one series, author or list by id, as the backend accepts them.
+const WATCH_FIELD_VALUES: Record<string, RegExp> = {
+  series: /^id:\d+$/,
+  author: /^id:\d+$/,
+  hardcover_list: /^(id|status):\d+$/,
+};
 
 /** What the current search shows, when it is one Hardcover series, author or list by id. */
 export const wantedWatchTargetFor = (
@@ -267,10 +271,11 @@ export const wantedWatchTargetFor = (
   value: unknown,
   label: string | undefined,
 ): WantedWatchTarget | null => {
-  if (provider !== 'hardcover' || !fieldKey || !WATCH_FIELDS.has(fieldKey)) {
+  const pattern = fieldKey ? WATCH_FIELD_VALUES[fieldKey] : undefined;
+  if (provider !== 'hardcover' || !fieldKey || !pattern) {
     return null;
   }
-  if (typeof value !== 'string' || !WATCH_FIELD_VALUE.test(value)) {
+  if (typeof value !== 'string' || !pattern.test(value)) {
     return null;
   }
   return { provider, fields: { [fieldKey]: value }, label: label || value };

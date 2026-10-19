@@ -1155,10 +1155,13 @@ export const unwatchForWanted = async (watchId: number): Promise<void> => {
   });
 };
 
-export const bookmarkAllForWanted = async (target: WantedWatchTarget): Promise<WantedBulkResult> =>
+export const bookmarkAllForWanted = async (
+  target: WantedWatchTarget,
+  userId?: number | null,
+): Promise<WantedBulkResult> =>
   fetchJSON<WantedBulkResult>(`${API.wanted}/bulk`, {
     method: 'POST',
-    body: JSON.stringify(target),
+    body: JSON.stringify(userId ? { ...target, user_id: userId } : target),
   });
 
 export const requestToWanted = async (requestId: number, adminNote?: string): Promise<void> => {

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { useWanted } from '../contexts/WantedContext';
-import { useMountEffect } from '../hooks/useMountEffect';
+import { useDependencyEffect } from '../hooks/useMountEffect';
 import { getAdminUsers } from '../services/api';
 import type { AdminUser } from '../services/api';
 import type { WantedWatchTarget } from '../types';
@@ -18,15 +18,23 @@ export const WantedWatchActions = ({ target }: { target: WantedWatchTarget }) =>
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [owner, setOwner] = useState(OWN);
 
-  // Admins may watch a list for another user (their Hardcover lists live in one account).
-  useMountEffect(() => {
-    if (!isAdmin) {
-      return;
+  // Admins may act for another user (the Hardcover lists live in the admin's account).
+  useDependencyEffect(() => {
+    if (!isAdmin || !enabled) {
+      return undefined;
     }
+    let cancelled = false;
     getAdminUsers()
-      .then(setUsers)
-      .catch(() => setUsers([]));
-  });
+      .then((loaded) => {
+        if (!cancelled) {
+          setUsers(loaded);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, enabled]);
 
   if (!enabled || !(canBookmark || isAdmin)) {
     return null;
@@ -51,11 +59,11 @@ export const WantedWatchActions = ({ target }: { target: WantedWatchTarget }) =>
         <EyeIcon className="h-4 w-4" />
         Wanted list:
       </span>
-      {canBookmark && (
+      {(canBookmark || ownerId !== null) && (
         <button
           type="button"
           disabled={busy}
-          onClick={() => act(() => bookmarkAll(target))}
+          onClick={() => act(() => bookmarkAll(target, ownerId))}
           className="rounded-full bg-gray-500/10 px-3 py-1 text-xs hover:bg-gray-500/20 disabled:opacity-50"
         >
           Bookmark all missing

@@ -278,6 +278,7 @@ describe('watch targets', () => {
       'status:1',
     );
     expect(wantedWatchTargetFor('hardcover', 'series', 'Dune', 'Dune')).toBeNull();
+    expect(wantedWatchTargetFor('hardcover', 'series', 'status:1', 'Dune')).toBeNull();
     expect(wantedWatchTargetFor('openlibrary', 'series', 'id:42', 'Dune')).toBeNull();
     expect(wantedWatchTargetFor('hardcover', 'title', 'id:42', 'Dune')).toBeNull();
   });
