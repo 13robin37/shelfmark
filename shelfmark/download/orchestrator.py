@@ -239,8 +239,15 @@ def queue_release(
     priority: int = 0,
     user_id: int | None = None,
     username: str | None = None,
+    *,
+    wanted_id: int | None = None,
+    staged_path: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Add a release to the download queue. Returns (success, error_message)."""
+    """Add a release to the download queue. Returns (success, error_message).
+
+    ``wanted_id`` and ``staged_path`` are keyword-only on purpose: they must never come
+    from a client's release data (a staged path is a file the server would deliver).
+    """
     try:
         source = release_data["source"]
         unavailable_message = _source_unavailable_message(source)
@@ -253,11 +260,6 @@ def queue_release(
         request_id: int | None = None
         if isinstance(raw_request_id, int) and raw_request_id > 0:
             request_id = raw_request_id
-        raw_wanted_id = release_data.get("_wanted_id")
-        wanted_id: int | None = None
-        if isinstance(raw_wanted_id, int) and raw_wanted_id > 0:
-            wanted_id = raw_wanted_id
-        staged_path = normalize_optional_text(release_data.get("_staged_path"))
         search_mode = _parse_release_search_mode(release_data.get("search_mode"))
 
         # Get author, year, preview, and content_type from top-level (preferred) or extra (fallback)

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from shelfmark.config.env import TMP_DIR
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
-from shelfmark.core.models import QueueStatus
+from shelfmark.core.models import TERMINAL_QUEUE_STATUSES, QueueStatus
 from shelfmark.core.release_picker import PickerPreferences, pick_releases, release_match_key
 from shelfmark.core.request_helpers import now_utc_iso
 from shelfmark.core.wanted_access import WANTED_CONTENT_TYPE, user_may_download
@@ -74,8 +74,13 @@ _SOURCE_SETTINGS_TABS = (
     "prowlarr_config",
     "newznab_config",
     "irc",
-    "wanted",
+    "users",
 )
+# The task kinds a failure can be blamed on the release for; anything else (a broken
+# destination, post-processing, a disabled source) is local and says nothing about it.
+_RELEASE_FAILURE_TYPES = frozenset({None, "StatusCallbackError"})
+# A user's own search makes background searches wait, but never longer than this.
+_MAX_YIELD_SECONDS = 30 * 60
 
 
 @dataclass
@@ -132,9 +137,7 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def release_to_queue_payload(
-    release: Release, book: dict[str, Any], wanted_id: int
-) -> dict[str, Any]:
+def release_to_queue_payload(release: Release, book: dict[str, Any]) -> dict[str, Any]:
     """The /api/releases/download body the release modal would send for this pick."""
     extra = release.extra if isinstance(release.extra, dict) else {}
     downloads = extra.get("downloads")
@@ -159,7 +162,6 @@ def release_to_queue_payload(
         "series_position": book.get("series_position"),
         "subtitle": book.get("subtitle"),
         "language": release.language,
-        "_wanted_id": wanted_id,
     }
     return {key: value for key, value in payload.items() if value is not None}
 
@@ -174,6 +176,7 @@ class WantedScheduler:
         *,
         resolve_auth_mode: Callable[[], str],
         queue_release: Callable[..., tuple[bool, str | None]],
+        task_lookup: Callable[[str], tuple[QueueStatus | None, Any]] | None = None,
         on_change: Callable[[int | None], None] | None = None,
     ) -> None:
         """Wire the scheduler to its store, the download queue and change listeners."""
@@ -181,6 +184,7 @@ class WantedScheduler:
         self._user_db = user_db
         self._resolve_auth_mode = resolve_auth_mode
         self._queue_release = queue_release
+        self._task_lookup = task_lookup
         self._on_change = on_change
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -235,18 +239,24 @@ class WantedScheduler:
             return
         self._service.prune_orphans()
         self._detect_source_changes()
+        self._reconcile_downloads()
         self._continue_cycles()
-        if self._should_yield():
-            return
         due = self._service.due_items(now_utc_iso(), 1)
-        if due:
+        if due and not self._should_yield(due[0]):
             self.run_cycle(due[0]["id"])
 
-    def _should_yield(self) -> bool:
+    def _should_yield(self, item: dict[str, Any]) -> bool:
         from shelfmark.download import warmup
 
         since_user_search = warmup.seconds_since_user_search()
-        if since_user_search is not None and since_user_search < USER_SEARCH_GRACE_SECONDS:
+        overdue = (
+            datetime.now(UTC) - datetime.fromisoformat(item["next_search_at"])
+        ).total_seconds()
+        if (
+            since_user_search is not None
+            and since_user_search < USER_SEARCH_GRACE_SECONDS
+            and overdue < _MAX_YIELD_SECONDS
+        ):
             return True
         now = time.monotonic()
         while self._searches and now - self._searches[0] > _RATE_WINDOW_SECONDS:
@@ -257,7 +267,7 @@ class WantedScheduler:
         from shelfmark.core.settings_registry import load_config_file
 
         snapshot = {
-            "sources": sorted(self._available_sources()),
+            "sources": self._available_sources(),
             "tabs": {tab: load_config_file(tab) for tab in _SOURCE_SETTINGS_TABS},
         }
         fingerprint = hashlib.sha256(
@@ -270,6 +280,27 @@ class WantedScheduler:
             logger.info("Wanted: source settings changed, %d item(s) due now", made_due)
             if made_due:
                 self._changed(None)
+
+    def _reconcile_downloads(self) -> None:
+        """Finish attempts whose end the terminal hook missed (a crash in it, a lost task)."""
+        if self._task_lookup is None:
+            return
+        for item in self._service.items_in_state(STATE_DOWNLOADING):
+            task_id = item.get("current_task_id")
+            if not task_id:
+                continue
+            status, task = self._task_lookup(task_id)
+            if status is None:
+                logger.warning("Wanted: task %s of %s vanished; moving on", task_id, item["title"])
+                self._service.finish_attempt(item["id"], task_id, ATTEMPT_CANCELLED, "Task lost")
+                self._service.update_item(
+                    item["id"],
+                    expected_state=STATE_DOWNLOADING,
+                    state=STATE_SEARCHING,
+                    current_task_id=None,
+                )
+            elif status in TERMINAL_QUEUE_STATUSES and task is not None:
+                self.on_task_terminal(task_id, status, task)
 
     def _continue_cycles(self) -> None:
         """Queue the next candidate for items whose last attempt has ended."""
@@ -400,7 +431,6 @@ class WantedScheduler:
         )
         if item is None:
             return
-        self._searches.append(time.monotonic())
         self._changed(wanted_id)
 
         pending = self._pending_subscribers(wanted_id)
@@ -429,6 +459,7 @@ class WantedScheduler:
             )
             return
 
+        self._searches.append(time.monotonic())
         releases, answered, failed = self._search(sources, book, pending)
         prefs = PickerPreferences(
             supported_formats=supported_formats(),
@@ -451,12 +482,22 @@ class WantedScheduler:
             len(picked),
             f" ({', '.join(failed)} failed)" if failed else "",
         )
-        self._service.update_item(wanted_id, searched_sources=answered)
+        searched = item.get("searched_sources")
+        previously_failed = set(searched.get("failed", [])) if isinstance(searched, dict) else set()
+        self._service.update_item(
+            wanted_id, searched_sources={"answered": answered, "failed": failed}
+        )
         if not picked:
             result = f"Searched {len(answered)} source(s), no matching release"
             if failed:
                 result += f"; {', '.join(failed)} failed"
-            self._end_cycle(item, found_nothing=True, source_errors=bool(failed), result=result)
+            # A source failing again is down, not blipping: back off as usual.
+            self._end_cycle(
+                item,
+                found_nothing=True,
+                source_errors=bool(set(failed) - previously_failed),
+                result=result,
+            )
             return
         self._cycles[wanted_id] = _Cycle(
             number=cycle_number, started=time.monotonic(), releases=picked
@@ -478,7 +519,9 @@ class WantedScheduler:
         from shelfmark.core import search_deadline
         from shelfmark.core.release_search import search_source_releases
 
-        languages = self._search_languages(pending)
+        # None means "every language"; said explicitly, or the search would fall back to
+        # the first subscriber's default languages.
+        languages = self._search_languages(pending) or ["all"]
         user_id = pending[0].get("user_id")
         releases: list[Release] = []
         answered: list[str] = []
@@ -550,13 +593,21 @@ class WantedScheduler:
             size=release.size,
             indexer=release.indexer,
         )
-        payload = release_to_queue_payload(release, item["book_data"], wanted_id)
+        payload = release_to_queue_payload(release, item["book_data"])
         username = owner.get("username")
         with self._delivery_lock:
             self._payloads[release.source_id] = payload
         success, error = self._queue_release(
-            payload, 0, user_id=_positive_int(owner.get("user_id")), username=username
+            payload,
+            0,
+            user_id=_positive_int(owner.get("user_id")),
+            username=username,
+            wanted_id=wanted_id,
         )
+        if not success and self._task_lookup is not None:
+            status, _task = self._task_lookup(release.source_id)
+            # Queued after all (e.g. only the status broadcast failed); it is ours.
+            success = status is not None and status not in TERMINAL_QUEUE_STATUSES
         if success:
             logger.info(
                 "Wanted: queued %s from %s for %s", release.title, release.source, item["title"]
@@ -647,42 +698,85 @@ class WantedScheduler:
         if wanted_id is None:
             return
         item = self._service.get_item(wanted_id)
-        if item is None or item.get("current_task_id") != task_id:
+        if item is None:
+            self._cycles.pop(wanted_id, None)
+            self._forget_task(task_id)
+            return
+        if item.get("current_task_id") != task_id:
+            # An earlier attempt the user retried by hand: its success still counts.
+            if status == QueueStatus.COMPLETE and item["state"] in (
+                STATE_WAITING,
+                STATE_SEARCHING,
+                STATE_PAUSED,
+            ):
+                self._deliver(item, task)
             self._forget_task(task_id)
             return
         message = getattr(task, "status_message", None)
         message = message.strip() if isinstance(message, str) and message.strip() else None
+        stalled = (message or "").startswith(_STALLED_MESSAGE_PREFIX)
 
         if status == QueueStatus.COMPLETE:
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_COMPLETE)
             self._deliver(item, task)
-        elif status == QueueStatus.CANCELLED and not (message or "").startswith(
-            _STALLED_MESSAGE_PREFIX
-        ):
+        elif status == QueueStatus.CANCELLED and not stalled:
+            # Cancelling a wanted download rejects that release, e.g. the wrong book.
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_REJECTED, message)
-            self._cycles.pop(wanted_id, None)
-            self._service.update_item(
-                wanted_id,
-                expected_state=STATE_DOWNLOADING,
-                state=STATE_PAUSED,
-                current_task_id=None,
-                last_result="Paused: the download was cancelled",
+            self._next_attempt(wanted_id, "Last release was cancelled")
+        elif self._failure_is_local(task):
+            self._service.finish_attempt(wanted_id, task_id, ATTEMPT_CANCELLED, message)
+            self._notify_local_failure(item, message)
+            self._end_cycle(
+                {**item, "state": STATE_DOWNLOADING},
+                found_nothing=False,
+                source_errors=True,
+                result=f"Download could not be delivered: {message or 'unknown error'}",
             )
-            self._changed(wanted_id)
         else:
             self._service.finish_attempt(
                 wanted_id, task_id, ATTEMPT_ERROR, message or "Download failed"
             )
-            self._service.update_item(
-                wanted_id,
-                expected_state=STATE_DOWNLOADING,
-                state=STATE_SEARCHING,
-                current_task_id=None,
-                last_result=f"Last attempt failed: {message or 'Download failed'}",
-            )
-            self._changed(wanted_id)
-            self.wake()
+            self._next_attempt(wanted_id, f"Last attempt failed: {message or 'Download failed'}")
         self._forget_task(task_id)
+
+    def _next_attempt(self, wanted_id: int, result: str) -> None:
+        self._service.update_item(
+            wanted_id,
+            expected_state=STATE_DOWNLOADING,
+            state=STATE_SEARCHING,
+            current_task_id=None,
+            last_result=result,
+        )
+        self._changed(wanted_id)
+        self.wake()
+
+    @staticmethod
+    def _failure_is_local(task: Any) -> bool:
+        """Whether a failure happened on our side rather than with the release."""
+        if getattr(task, "staged_path", None):
+            return True
+        return getattr(task, "last_error_type", None) not in _RELEASE_FAILURE_TYPES
+
+    def _notify_local_failure(self, item: dict[str, Any], message: str | None) -> None:
+        from shelfmark.core.notifications import (
+            NotificationContext,
+            NotificationEvent,
+            notify_admin,
+        )
+
+        try:
+            notify_admin(
+                NotificationEvent.DOWNLOAD_FAILED,
+                NotificationContext(
+                    event=NotificationEvent.DOWNLOAD_FAILED,
+                    title=item["title"],
+                    author=item.get("author") or "Unknown author",
+                    content_type=WANTED_CONTENT_TYPE,
+                    error_message=message,
+                ),
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("Wanted: could not notify about %s: %s", item["title"], exc)
 
     # -- delivery ------------------------------------------------------------------
 
@@ -744,15 +838,14 @@ class WantedScheduler:
         copy: Path,
         payload: dict[str, Any],
     ) -> bool:
-        delivery_payload = {key: value for key, value in payload.items() if key != "_wanted_id"}
-        delivery_payload["source_id"] = f"{task_id}#wanted-{wanted_id}-{index}"
-        delivery_payload["_staged_path"] = str(copy)
+        delivery_payload = {**payload, "source_id": f"{task_id}#wanted-{wanted_id}-{index}"}
         owner = group[0]
         success, error = self._queue_release(
             delivery_payload,
             0,
             user_id=_positive_int(owner.get("user_id")),
             username=owner.get("username"),
+            staged_path=str(copy),
         )
         if not success:
             logger.warning("Wanted: could not queue a delivery of %s: %s", task_id, error)

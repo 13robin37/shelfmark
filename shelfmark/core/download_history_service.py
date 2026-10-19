@@ -22,7 +22,7 @@ logger = setup_logger(__name__)
 
 VALID_TERMINAL_STATUSES = frozenset(s.value for s in TERMINAL_QUEUE_STATUSES)
 ACTIVE_DOWNLOAD_STATUS = "active"
-VALID_ORIGINS = frozenset({"direct", "requested"})
+VALID_ORIGINS = frozenset({"direct", "requested", "wanted"})
 
 
 def _is_convertible_to_int(
@@ -58,7 +58,7 @@ def _normalize_origin(origin: object) -> str:
         return "direct"
     lowered = normalized.lower()
     if lowered not in VALID_ORIGINS:
-        msg = "origin must be one of: direct, requested"
+        msg = "origin must be one of: direct, requested, wanted"
         raise ValueError(msg)
     return lowered
 

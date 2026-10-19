@@ -630,6 +630,11 @@ def _emit_wanted_update(wanted_id: int | None) -> None:
         )
 
 
+def _wanted_task_lookup(task_id: str) -> tuple[QueueStatus | None, Any]:
+    queue = backend.book_queue
+    return queue.get_task_status(task_id), queue.get_task(task_id)
+
+
 def _on_wanted_route_change(wanted_id: int | None) -> None:
     if wanted_scheduler is not None:
         wanted_scheduler.wake()
@@ -646,6 +651,7 @@ if wanted_service is not None:
         user_db,
         resolve_auth_mode=_resolve_auth_mode_for_routes,
         queue_release=_queue_release_for_routes,
+        task_lookup=_wanted_task_lookup,
         on_change=_emit_wanted_update,
     )
     register_wanted_routes(
@@ -1591,6 +1597,8 @@ def _record_download_queued(task_id: str, task: Any) -> None:
     owner_user_id = normalize_positive_int(getattr(task, "user_id", None))
     request_id = normalize_positive_int(getattr(task, "request_id", None))
     origin = "requested" if request_id else "direct"
+    if getattr(task, "wanted_id", None) is not None:
+        origin = "wanted"
 
     source_name = normalize_source(getattr(task, "source", None))
     source_display = get_source_display_name(source_name)

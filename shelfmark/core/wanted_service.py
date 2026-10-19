@@ -174,7 +174,7 @@ class WantedService:
             return None
         item = dict(row)
         item["book_data"] = _load_json(item.get("book_data")) or {}
-        item["searched_sources"] = _load_json(item.get("searched_sources")) or []
+        item["searched_sources"] = _load_json(item.get("searched_sources")) or {}
         return item
 
     @staticmethod

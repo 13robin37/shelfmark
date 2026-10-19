@@ -79,6 +79,11 @@ class BookQueue:
             if task.added_time == 0:
                 task.added_time = time.time()
 
+            # A task cancelled while queued left its entry behind; re-adding it must not
+            # dispatch it twice.
+            if task_id in self._status:
+                self._drop_queue_entries_locked(task_id)
+
             queue_item = QueueItem(task_id, task.priority, task.added_time)
             self._queue.put(queue_item)
             self._task_data[task_id] = task
@@ -320,15 +325,7 @@ class BookQueue:
             self._active_downloads.pop(task_id, None)
             self._cancel_flags.pop(task_id, None)
 
-            # De-duplicate queue entries for this task id.
-            temp_items: list[QueueItem] = []
-            while not self._queue.empty():
-                item = self._queue.get_nowait()
-                if item.book_id != task_id:
-                    temp_items.append(item)
-
-            for item in temp_items:
-                self._queue.put(item)
+            self._drop_queue_entries_locked(task_id)
 
             queue_item = QueueItem(task_id, task.priority, time.time())
             self._queue.put(queue_item)
@@ -342,6 +339,16 @@ class BookQueue:
             except _QUEUE_HOOK_ERRORS as exc:
                 logger.warning("Queue hook failed while requeueing task %s: %s", task_id, exc)
         return True
+
+    def _drop_queue_entries_locked(self, task_id: str) -> None:
+        """Remove every queue entry for ``task_id``. Caller holds the lock."""
+        kept: list[QueueItem] = []
+        while not self._queue.empty():
+            item = self._queue.get_nowait()
+            if item.book_id != task_id:
+                kept.append(item)
+        for item in kept:
+            self._queue.put(item)
 
     def reorder_queue(self, task_priorities: dict[str, int]) -> bool:
         """Bulk reorder queue by mapping task_id to new priority."""

@@ -12,7 +12,6 @@ from shelfmark.core.user_db import UserDB
 from shelfmark.core.wanted_service import (
     STATE_DOWNLOADING,
     STATE_OBTAINED,
-    STATE_PAUSED,
     STATE_SEARCHING,
     STATE_WAITING,
     WantedService,
@@ -41,6 +40,8 @@ class _Env:
         self.alice = self.user_db.create_user(username="alice")
         self.bob = self.user_db.create_user(username="bob")
         self.queued: list[tuple[dict, int | None, str | None]] = []
+        self.queued_kwargs: list[dict] = []
+        self.queue_statuses: dict[str, tuple] = {}
         self.queue_result: tuple[bool, str | None] = (True, None)
         self.results: dict[str, tuple[list[Release], str | None]] = {
             "direct_download": ([_release("aa-1"), _release("aa-2", fmt="mobi")], None),
@@ -54,13 +55,18 @@ class _Env:
             self.user_db,
             resolve_auth_mode=lambda: "builtin",
             queue_release=self._queue_release,
+            task_lookup=self._lookup,
             on_change=self.changed.append,
         )
 
-    def _queue_release(self, payload, priority, *, user_id=None, username=None):
+    def _queue_release(self, payload, priority, *, user_id=None, username=None, **kwargs):
         del priority
         self.queued.append((payload, user_id, username))
+        self.queued_kwargs.append(kwargs)
         return self.queue_result
+
+    def _lookup(self, task_id):
+        return self.queue_statuses.get(task_id, (QueueStatus.DOWNLOADING, None))
 
     def _search(self, source, book, **kwargs):
         del book, kwargs
@@ -104,7 +110,7 @@ def env(tmp_path):
         patch("shelfmark.core.release_search.search_source_releases", side_effect=env._search),
         patch("shelfmark.core.library_index.is_in_library", side_effect=lambda *_a: env.in_library),
         patch("shelfmark.download.warmup.seconds_since_user_search", return_value=None),
-        patch("shelfmark.core.settings_registry.load_config_file", return_value={}),
+        patch("shelfmark.core.settings_registry.load_config_file", side_effect=lambda _tab: {}),
         patch(
             "shelfmark.core.wanted_access.load_users_request_policy_settings",
             side_effect=lambda: env.policy,
@@ -124,14 +130,14 @@ def test_a_cycle_queues_the_best_release_for_the_first_subscriber(env):
 
     payload, user_id, username = env.queued[0]
     assert payload["source_id"] == "aa-1"
-    assert payload["_wanted_id"] == wanted_id
+    assert env.queued_kwargs[0] == {"wanted_id": wanted_id}
     assert payload["content_type"] == "ebook"
     assert (user_id, username) == (env.alice["id"], "alice")
     item = env.item(wanted_id)
     assert item["state"] == STATE_DOWNLOADING
     assert item["current_task_id"] == "aa-1"
     assert item["search_count"] == 1
-    assert item["searched_sources"] == ["direct_download", "libgen"]
+    assert item["searched_sources"] == {"answered": ["direct_download", "libgen"], "failed": []}
 
 
 def test_a_failed_attempt_moves_on_to_the_next_release(env):
@@ -191,7 +197,7 @@ def test_completion_marks_the_item_obtained_and_delivered(env):
     assert all(sub["delivered_at"] for sub in env.service.list_subscribers(wanted_id))
 
 
-def test_a_user_cancel_pauses_but_a_stall_moves_on(env):
+def test_a_cancel_rejects_the_release_and_moves_on(env):
     wanted_id = env.add()
     env.scheduler.tick()
     env.finish(wanted_id, QueueStatus.CANCELLED, "Download stalled (no activity for 300s)")
@@ -199,10 +205,14 @@ def test_a_user_cancel_pauses_but_a_stall_moves_on(env):
 
     env.scheduler.tick()
     env.finish(wanted_id, QueueStatus.CANCELLED, "Cancelled")
-    assert env.item(wanted_id)["state"] == STATE_PAUSED
-    # The cancelled release is never offered again.
-    assert "id:direct_download:libgen:1" not in env.service.excluded_release_keys(wanted_id, 99)
-    assert "id:libgen:libgen:1" in env.service.excluded_release_keys(wanted_id, 99)
+
+    assert env.item(wanted_id)["state"] == STATE_SEARCHING
+    # The cancelled release is never offered again; the stalled one only skips this cycle.
+    excluded = env.service.excluded_release_keys(wanted_id, 99)
+    assert "id:libgen:libgen:1" in excluded
+    assert "id:direct_download:aa-1" not in excluded
+    env.scheduler.tick()
+    assert env.queued[-1][0]["source_id"] == "aa-2"
 
 
 def test_a_book_already_in_the_library_is_not_downloaded(env):
@@ -229,7 +239,7 @@ def test_nothing_found_waits_and_source_errors_retry_sooner(env):
     assert item["backoff_level"] == 0
     assert "libgen failed" in item["last_result"]
 
-    env.results = {"direct_download": ([], None), "libgen": ([], None)}
+    # Failing again is an outage, not a blip: the usual backoff applies.
     env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
     env.scheduler.tick()
     assert env.item(wanted_id)["backoff_level"] == 1
@@ -279,7 +289,8 @@ def test_releases_from_sources_a_subscriber_may_not_use_are_skipped(env):
 
 
 def test_a_release_that_cannot_be_queued_is_skipped_without_a_strike(env):
-    env.queue_result = (False, "Release is already in the download queue")
+    env.queue_result = (False, "Source unavailable")
+    env.queue_statuses = dict.fromkeys(("aa-1", "aa-2", "libgen:1"), (None, None))
     wanted_id = env.add()
 
     env.scheduler.tick()
@@ -333,7 +344,7 @@ def test_release_payload_matches_the_release_modal():
         seeders=5,
         extra={"downloads": 3, "author": "Frank Herbert"},
     )
-    payload = ws.release_to_queue_payload(release, {**BOOK, "year": "1965"}, 7)
+    payload = ws.release_to_queue_payload(release, {**BOOK, "year": "1965"})
 
     assert payload == {
         "source": "prowlarr",
@@ -349,7 +360,6 @@ def test_release_payload_matches_the_release_modal():
         "extra": {"downloads": 3, "author": "Frank Herbert"},
         "content_type": "ebook",
         "language": "en",
-        "_wanted_id": 7,
     }
 
 
@@ -396,9 +406,8 @@ def test_another_target_gets_its_own_delivery_task_from_a_copy(env, two_targets,
     delivery, user_id, username = env.queued[-1]
     assert (user_id, username) == (env.bob["id"], "bob")
     assert delivery["source_id"] == f"aa-1#wanted-{wanted_id}-1"
-    assert "_wanted_id" not in delivery
-    assert (tmp_path / "held").exists()
-    assert delivery["_staged_path"].endswith("Dune.epub")
+    assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
+    assert "wanted_id" not in env.queued_kwargs[-1]
     subscribers = env.service.list_subscribers(wanted_id)
     assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", delivery["source_id"]]
     assert env.item(wanted_id)["state"] == STATE_OBTAINED
@@ -505,3 +514,101 @@ def test_changes_are_reported_to_listeners(env):
     env.scheduler.tick()
 
     assert wanted_id in env.changed
+
+
+def test_a_local_failure_is_no_strike_and_waits(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    item = env.item(wanted_id)
+    task = SimpleNamespace(
+        wanted_id=wanted_id,
+        task_id=item["current_task_id"],
+        source="direct_download",
+        status_message="Destination misconfigured",
+        last_error_type="PermissionError",
+        staged_path=None,
+    )
+    with patch("shelfmark.core.notifications.notify_admin") as notify_admin:
+        env.scheduler.on_task_terminal(task.task_id, QueueStatus.ERROR, task)
+
+    item = env.item(wanted_id)
+    assert item["state"] == STATE_WAITING
+    assert item["backoff_level"] == 0
+    assert "could not be delivered" in item["last_result"]
+    assert env.service.list_attempts(wanted_id)[0]["status"] == "cancelled"
+    notify_admin.assert_called_once()
+
+
+def test_a_lost_task_is_reconciled(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    env.queue_statuses["aa-1"] = (None, None)
+
+    env.scheduler.tick()
+
+    assert env.queued[-1][0]["source_id"] == "libgen:1"
+    assert env.service.list_attempts(wanted_id)[-1]["status"] == "cancelled"
+
+
+def test_a_missed_terminal_event_is_reconciled(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    task = SimpleNamespace(
+        wanted_id=wanted_id,
+        task_id="aa-1",
+        source="direct_download",
+        user_id=env.alice["id"],
+        status_message=None,
+    )
+    env.queue_statuses["aa-1"] = (QueueStatus.COMPLETE, task)
+
+    env.scheduler.tick()
+
+    assert env.item(wanted_id)["state"] == STATE_OBTAINED
+
+
+def test_queue_failure_after_the_task_was_added_still_counts(env):
+    env.queue_result = (False, "broadcast failed")
+    wanted_id = env.add()
+    env.queue_statuses["aa-1"] = (QueueStatus.QUEUED, None)
+
+    env.scheduler.tick()
+
+    assert len(env.queued) == 1
+    assert env.item(wanted_id)["current_task_id"] == "aa-1"
+
+
+def test_a_manually_retried_old_attempt_still_delivers(env):
+    wanted_id = env.add()
+    env.scheduler.tick()
+    env.finish(wanted_id, QueueStatus.ERROR)
+    env.scheduler.tick()
+    env.service.update_item(wanted_id, state=STATE_WAITING, current_task_id=None)
+
+    old = SimpleNamespace(
+        wanted_id=wanted_id,
+        task_id="aa-1",
+        source="direct_download",
+        user_id=env.alice["id"],
+        status_message=None,
+    )
+    env.scheduler.on_task_terminal("aa-1", QueueStatus.COMPLETE, old)
+
+    assert env.item(wanted_id)["state"] == STATE_OBTAINED
+
+
+def test_all_languages_are_searched_explicitly(env):
+    seen = []
+    with (
+        patch.object(ws.WantedScheduler, "_search_languages", staticmethod(lambda _subs: None)),
+        patch(
+            "shelfmark.core.release_search.search_source_releases",
+            side_effect=lambda source, book, **kwargs: (
+                seen.append(kwargs["languages"]) or env._search(source, book)
+            ),
+        ),
+    ):
+        env.add()
+        env.scheduler.tick()
+
+    assert seen and all(languages == ["all"] for languages in seen)
