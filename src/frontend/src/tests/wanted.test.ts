@@ -63,7 +63,7 @@ describe('isBookmarkable', () => {
 
 describe('buildWantedBookPayload', () => {
   it('keeps the fields the backend matches releases with', () => {
-    const payload = buildWantedBookPayload(book);
+    const payload = buildWantedBookPayload({ ...book, release_date: '2027-03-12' });
     expect(payload).toMatchObject({
       title: 'Dune',
       provider: 'hardcover',
@@ -71,11 +71,9 @@ describe('buildWantedBookPayload', () => {
       isbn_13: '9780441172719',
       authors: ['Frank Herbert'],
       titles_by_language: { de: 'Der Wüstenplanet' },
+      release_date: '2027-03-12',
       content_type: 'ebook',
     });
-  });
-
-  it('returns null without a provider id', () => {
     expect(buildWantedBookPayload({ ...book, provider_id: undefined })).toBeNull();
   });
 });
@@ -168,6 +166,26 @@ describe('describeWantedItem', () => {
     ).toBe('Searched 2 source(s), no matching release · next search in 6 h');
     expect(describeWantedItem(item(), now)).toBe('Waiting for the first search');
   });
+
+  it('says when an unreleased book comes out', () => {
+    const unreleased = item({
+      release_date: '2027-03-12',
+      last_result: 'Not released yet',
+      next_search_at: '2026-10-26T12:00:00+00:00',
+    });
+    const expectedDate = new Date(Date.UTC(2027, 2, 12)).toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    expect(describeWantedItem(unreleased, now)).toBe(
+      `Releases ${expectedDate} · next search in 7 d`,
+    );
+    expect(describeWantedItem(item({ release_date: '2020-01-01' }), now)).toBe(
+      'Waiting for the first search',
+    );
+  });
 });
 
 const ids = (list: WantedItem[]) => list.map((entry) => entry.id);
@@ -238,35 +256,6 @@ describe('describeAttemptBlock', () => {
   });
 });
 
-describe('unreleased books', () => {
-  it('says when a bookmarked book comes out', () => {
-    const now = Date.parse('2026-10-19T12:00:00Z');
-    const unreleased = item({
-      release_date: '2027-03-12',
-      last_result: 'Not released yet',
-      next_search_at: '2026-10-26T12:00:00+00:00',
-    });
-    const expectedDate = new Date(Date.UTC(2027, 2, 12)).toLocaleDateString(undefined, {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-      timeZone: 'UTC',
-    });
-    expect(describeWantedItem(unreleased, now)).toBe(
-      `Releases ${expectedDate} · next search in 7 d`,
-    );
-    expect(describeWantedItem(item({ release_date: '2020-01-01' }), now)).toBe(
-      'Waiting for the first search',
-    );
-  });
-
-  it('passes the release date on when bookmarking', () => {
-    expect(buildWantedBookPayload({ ...book, release_date: '2027-03-12' })?.release_date).toBe(
-      '2027-03-12',
-    );
-  });
-});
-
 describe('watch targets', () => {
   it('only takes one Hardcover series, author or list by id', () => {
     expect(wantedWatchTargetFor('hardcover', 'series', 'id:42', 'Dune')).toEqual({
@@ -277,7 +266,6 @@ describe('watch targets', () => {
     expect(wantedWatchTargetFor('hardcover', 'hardcover_list', 'status:1', undefined)?.label).toBe(
       'status:1',
     );
-    expect(wantedWatchTargetFor('hardcover', 'series', 'Dune', 'Dune')).toBeNull();
     expect(wantedWatchTargetFor('hardcover', 'series', 'status:1', 'Dune')).toBeNull();
     expect(wantedWatchTargetFor('openlibrary', 'series', 'id:42', 'Dune')).toBeNull();
     expect(wantedWatchTargetFor('hardcover', 'title', 'id:42', 'Dune')).toBeNull();

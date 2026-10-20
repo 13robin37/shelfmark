@@ -6,6 +6,9 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock
 
+import pytest
+
+import shelfmark.download.orchestrator as orchestrator
 from shelfmark.core.models import DownloadTask
 from shelfmark.core.queue import BookQueue
 
@@ -17,31 +20,16 @@ class _AvailableSource:
         return True
 
 
-def test_queue_release_carries_wanted_id_and_staged_path(monkeypatch, tmp_path):
-    import shelfmark.download.orchestrator as orchestrator
-
+@pytest.fixture
+def queue(monkeypatch):
     queue = BookQueue()
     monkeypatch.setattr(orchestrator, "book_queue", queue)
     monkeypatch.setattr(orchestrator, "ws_manager", None)
     monkeypatch.setattr(orchestrator, "get_source", lambda _source: _AvailableSource())
-    staged = tmp_path / "copy.epub"
-
-    ok, error = orchestrator.queue_release(
-        {"source": "direct_download", "source_id": "md5#wanted-3-1", "title": "Dune"},
-        wanted_id=3,
-        staged_path=str(staged),
-    )
-
-    assert (ok, error) == (True, None)
-    task = queue.get_task("md5#wanted-3-1")
-    assert task.wanted_id == 3
-    assert task.staged_path == str(staged)
-    assert orchestrator._task_to_dict(task)["wanted_id"] == 3
+    return queue
 
 
 def test_downloaded_file_listener_sees_the_file_before_post_processing(monkeypatch, tmp_path):
-    import shelfmark.download.orchestrator as orchestrator
-
     downloaded = tmp_path / "Dune.epub"
     downloaded.write_text("book")
     task = DownloadTask(task_id="md5", source="direct_download", title="Dune")
@@ -67,14 +55,7 @@ def test_downloaded_file_listener_sees_the_file_before_post_processing(monkeypat
     assert order == ["seen:Dune.epub", "post"]
 
 
-def test_release_data_cannot_smuggle_a_staged_path_or_wanted_id(monkeypatch, tmp_path):
-    import shelfmark.download.orchestrator as orchestrator
-
-    queue = BookQueue()
-    monkeypatch.setattr(orchestrator, "book_queue", queue)
-    monkeypatch.setattr(orchestrator, "ws_manager", None)
-    monkeypatch.setattr(orchestrator, "get_source", lambda _source: _AvailableSource())
-
+def test_release_data_cannot_smuggle_a_staged_path_or_wanted_id(queue):
     orchestrator.queue_release(
         {
             "source": "direct_download",
@@ -103,18 +84,12 @@ def test_re_adding_a_task_cancelled_while_queued_dispatches_it_once():
     assert queue.get_next() is None
 
 
-def test_a_staged_delivery_task_only_post_processes_its_copy(monkeypatch, tmp_path):
-    import shelfmark.download.orchestrator as orchestrator
-
+def test_a_staged_delivery_task_only_post_processes_its_copy(monkeypatch, tmp_path, queue):
     copy = tmp_path / "held" / "Dune.epub"
     copy.parent.mkdir()
     copy.write_text("book")
-    queue = BookQueue()
     handler = MagicMock()
     seen: list[Path] = []
-    monkeypatch.setattr(orchestrator, "book_queue", queue)
-    monkeypatch.setattr(orchestrator, "ws_manager", None)
-    monkeypatch.setattr(orchestrator, "get_source", lambda _source: _AvailableSource())
     monkeypatch.setattr(orchestrator, "get_handler", lambda _source: handler)
     monkeypatch.setattr(
         orchestrator,
@@ -122,7 +97,7 @@ def test_a_staged_delivery_task_only_post_processes_its_copy(monkeypatch, tmp_pa
         lambda temp_file, *_args, **_kwargs: seen.append(temp_file) or "folder://done",
     )
 
-    ok, _error = orchestrator.queue_release(
+    ok, error = orchestrator.queue_release(
         {"source": "direct_download", "source_id": "md5~wanted-3-1", "title": "Dune"},
         user_id=2,
         username="bob",
@@ -131,7 +106,10 @@ def test_a_staged_delivery_task_only_post_processes_its_copy(monkeypatch, tmp_pa
     )
     task = queue.get_task("md5~wanted-3-1")
 
-    assert ok is True
+    assert (ok, error) == (True, None)
+    assert task.wanted_id == 3
+    assert task.staged_path == str(copy)
+    assert orchestrator._task_to_dict(task)["wanted_id"] == 3
     assert orchestrator._download_task("md5~wanted-3-1", Event()) == "folder://done"
     handler.download.assert_not_called()
     assert seen == [copy]
