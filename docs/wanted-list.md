@@ -9,7 +9,7 @@ Bookmark an ebook that is not available yet, and Shelfmark downloads it on its o
 - **History** shows every release tried for a book and whether it is blocked; admins also see why it failed.
 - **Languages** sets the languages you want a book in; bookmarking from the release dialog takes its language filter. Changing them searches again right away.
 - Admins see every bookmark and who wants it, and can pause, resume, retry failed and cancelled releases (all at once, or one with **Allow again** in the history; both drop those entries from the history) or delete an entry for everyone.
-- In the release dialog of a book you bookmarked, each release the wanted list would pass over says why (another volume, wrong format, failed before, ...). Downloading a release there while the bookmark waits counts for the bookmark: it is delivered to everyone who bookmarked the book, like a release the wanted list found itself. Your pick is downloaded as chosen, even if the wanted list would have skipped it; if it fails, the bookmark keeps its planned next search.
+- In the release dialog of a book you bookmarked, each release the wanted list would pass over says why (another volume, wrong format, failed before, ...). Downloading a release there while the bookmark waits counts for your bookmark only: others who bookmarked the book never vetted your pick, so they keep waiting for a release of their own. Your pick is downloaded as chosen, even if the wanted list would have skipped it; if it fails, the bookmark keeps its planned next search.
 
 The eye only appears for ebooks from a metadata provider, and only for users who may download directly from at least one wanted-list source. Users whose policy requires a request do not see it.
 
