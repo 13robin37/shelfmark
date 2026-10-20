@@ -11,6 +11,8 @@ from shelfmark.core.request_helpers import coerce_bool
 DEFAULT_BACKOFF_HOURS: tuple[float, ...] = (1.0, 6.0, 24.0)
 DEFAULT_MAX_SEARCHES_PER_HOUR = 6
 DEFAULT_FEED_INTERVAL_MINUTES = 30
+MAX_BACKOFF_HOURS = 24.0 * 365
+MAX_FORMAT_WAIT_DAYS = 90.0
 _DEFAULT_SOURCES: tuple[tuple[str, bool], ...] = (
     ("direct_download", True),
     ("libgen", True),
@@ -85,7 +87,7 @@ def format_wait() -> tuple[str | None, float]:
         days = float(str(config.get("WANTED_FORMAT_WAIT_DAYS", 0) or 0))
     except ValueError:
         days = 0.0
-    return cutoff, max(days, 0.0)
+    return cutoff, min(max(days, 0.0), MAX_FORMAT_WAIT_DAYS) if math.isfinite(days) else 0.0
 
 
 def supported_formats() -> frozenset[str]:
@@ -113,8 +115,9 @@ def backoff_hours() -> tuple[float, ...]:
             parsed = float(str(part).strip())
         except ValueError:
             continue
-        if parsed > 0:
-            hours.append(parsed)
+        # Longer waits overflow the date arithmetic; a year is "practically never" already.
+        if math.isfinite(parsed) and parsed > 0:
+            hours.append(min(parsed, MAX_BACKOFF_HOURS))
     return tuple(hours) or DEFAULT_BACKOFF_HOURS
 
 
@@ -135,6 +138,6 @@ def max_searches_per_hour() -> int:
     value = config.get("WANTED_MAX_SEARCHES_PER_HOUR", DEFAULT_MAX_SEARCHES_PER_HOUR)
     try:
         parsed = int(float(str(value)))
-    except ValueError:
+    except ValueError, OverflowError:
         return DEFAULT_MAX_SEARCHES_PER_HOUR
     return max(parsed, 1)

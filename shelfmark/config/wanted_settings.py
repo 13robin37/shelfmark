@@ -14,6 +14,7 @@ from shelfmark.core.wanted_config import (
     DEFAULT_BACKOFF_HOURS,
     DEFAULT_FEED_INTERVAL_MINUTES,
     DEFAULT_MAX_SEARCHES_PER_HOUR,
+    MAX_FORMAT_WAIT_DAYS,
     default_format_order,
     default_source_order,
 )
@@ -115,7 +116,7 @@ def wanted_settings() -> list[SettingsField]:
             ),
             default=0,
             min_value=0,
-            max_value=90,
+            max_value=int(MAX_FORMAT_WAIT_DAYS),
             show_when={"field": "WANTED_ENABLED", "value": True},
         ),
         HeadingField(
