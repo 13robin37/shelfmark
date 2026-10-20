@@ -474,17 +474,19 @@ class NewznabSource(ReleaseSource):
         clients = self._get_clients()
         if not clients:
             return None
-        # Feed items are cached like search results but rarely read back; drop stale ones.
+        # Converting caches every feed item, and few are ever read back.
         cleanup_expired()
         categories = _configured_categories(content_type)
-        results: list[dict] = []
+        releases: list[Release] = []
         for connection in clients:
             for raw_result in connection.client.recent(categories=categories):
-                result = dict(raw_result)
-                result["indexer"] = result.get("indexer") or connection.name
-                result["_newznab_connection_id"] = connection.connection_id
-                results.append(result)
-        return [_newznab_result_to_release(r, content_type, categories) for r in results]
+                result = {
+                    **raw_result,
+                    "indexer": raw_result.get("indexer") or connection.name,
+                    "_newznab_connection_id": connection.connection_id,
+                }
+                releases.append(_newznab_result_to_release(result, content_type, categories))
+        return releases
 
     def is_available(self) -> bool:
         if not config.get("NEWZNAB_ENABLED", False):

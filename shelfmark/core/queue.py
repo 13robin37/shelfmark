@@ -341,7 +341,7 @@ class BookQueue:
         return True
 
     def _drop_queue_entries_locked(self, task_id: str) -> None:
-        """Remove every queue entry for ``task_id``. Caller holds the lock."""
+        """Remove every queue entry for ``task_id``."""
         kept: list[QueueItem] = []
         while not self._queue.empty():
             item = self._queue.get_nowait()

@@ -112,18 +112,18 @@ class NewznabClient:
         """
         if not query:
             return []
-        return self._search_params(
+        return self._run_search(
             {"t": search_type, "q": query, "limit": limit, "offset": offset}, categories
         )
 
     def recent(self, categories: list[int] | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """The newest releases: a search without a query is the indexer's RSS feed."""
-        return self._search_params({"t": "search", "limit": limit}, categories, quiet=True)
+        return self._run_search({"t": "search", "limit": limit}, categories, quiet=True)
 
-    def _search_params(
+    def _run_search(
         self, params: dict[str, Any], categories: list[int] | None, *, quiet: bool = False
     ) -> list[dict[str, Any]]:
-        """``quiet``: a routine feed read, logged without a traceback."""
+        """``quiet`` logs failures without a traceback (routine feed reads)."""
         query = params.get("q", "")
         if categories:
             params["cat"] = ",".join(str(c) for c in categories)
@@ -135,15 +135,11 @@ class NewznabClient:
             if not results:
                 preview = response.text[:300].strip() if response.text else "<empty>"
                 logger.debug("Newznab empty response body: %s", preview)
-        except requests.exceptions.RequestException as exc:
-            if quiet:
-                logger.info("Newznab feed read failed: %s", exc)
-            else:
-                logger.exception("Newznab search request failed")
-            return []
         except Exception as exc:
             if quiet:
                 logger.info("Newznab feed read failed: %s", exc)
+            elif isinstance(exc, requests.exceptions.RequestException):
+                logger.exception("Newznab search request failed")
             else:
                 logger.exception("Newznab search failed")
             return []

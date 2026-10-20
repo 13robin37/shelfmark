@@ -409,15 +409,8 @@ class ProwlarrClient:
         if not query:
             return []
 
-        params: dict[str, Any] = {
-            "t": search_type,
-            "q": query,
-            "limit": limit,
-            "offset": offset,
-        }
-        if categories:
-            params["cat"] = ",".join(str(c) for c in categories)
-        return self._torznab_get(indexer_id, params, quiet=False)
+        params = {"t": search_type, "q": query, "limit": limit, "offset": offset}
+        return self._torznab_get(indexer_id, params, categories, quiet=False)
 
     def torznab_recent(
         self, *, indexer_id: int, categories: list[int] | None = None, limit: int = 100
@@ -428,15 +421,20 @@ class ProwlarrClient:
             ProwlarrSearchError: The feed could not be read.
 
         """
-        params: dict[str, Any] = {"t": "search", "limit": limit}
-        if categories:
-            params["cat"] = ",".join(str(c) for c in categories)
-        return self._torznab_get(indexer_id, params, quiet=True)
+        params = {"t": "search", "limit": limit}
+        return self._torznab_get(indexer_id, params, categories, quiet=True)
 
     def _torznab_get(
-        self, indexer_id: int, params: dict[str, Any], *, quiet: bool
+        self,
+        indexer_id: int,
+        params: dict[str, Any],
+        categories: list[int] | None,
+        *,
+        quiet: bool,
     ) -> list[dict[str, Any]]:
-        """``quiet``: a routine feed read; its failures are reported by the caller."""
+        """``quiet`` leaves logging failures to the caller (routine feed reads)."""
+        if categories:
+            params["cat"] = ",".join(str(c) for c in categories)
         endpoint = f"/api/v1/indexer/{int(indexer_id)}/newznab"
         url = self.base_url + endpoint
 

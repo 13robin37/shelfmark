@@ -15,7 +15,7 @@ import shutil
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from shelfmark.core.notifications import NotificationEvent
     from shelfmark.core.user_db import UserDB
     from shelfmark.metadata_providers import BookMetadata
     from shelfmark.release_sources import Release
@@ -106,9 +107,7 @@ _DUE_BATCH = 5
 _WATCH_INTERVAL = timedelta(hours=6)
 # A release date is checked against the metadata again at least this often.
 _RELEASE_RECHECK = timedelta(days=7)
-# Sources with feeds of their newest releases.
 _FEED_SOURCES = ("prowlarr", "newznab")
-# Feed releases already checked, remembered so each is matched against bookmarks once.
 _FEED_SEEN_LIMIT = 20_000
 
 
@@ -121,7 +120,7 @@ class _Cycle:
     releases: list[Release] = field(default_factory=list)
     queue_error: str | None = None
     announced: bool = False
-    # "manual" (a user's pick) or "feed": when its releases fail, no backoff follows.
+    # "search", "manual" (a user's pick) or "feed"; only a failed search backs off.
     origin: str = "search"
 
 
@@ -159,8 +158,6 @@ def _search_starts(book_data: dict[str, Any], book: BookMetadata | None = None) 
 
 def release_from_dict(data: object) -> Release | None:
     """A release as the frontend holds it (an /api/releases entry), or None if malformed."""
-    from dataclasses import fields
-
     from shelfmark.release_sources import Release
 
     if not isinstance(data, dict):
@@ -198,7 +195,15 @@ def _positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
-_USER_TEMPLATE_KEYS = ("TEMPLATE_RENAME", "TEMPLATE_ORGANIZE")
+def _status_message(task: Any) -> str | None:
+    message = getattr(task, "status_message", None)
+    return (message.strip() or None) if isinstance(message, str) else None
+
+
+def _user_cancelled(status: QueueStatus, message: str | None) -> bool:
+    # The stall watchdog cancels too; that says nothing against the release.
+    stalled = (message or "").startswith(_STALLED_MESSAGE_PREFIX)
+    return status == QueueStatus.CANCELLED and not stalled
 
 
 def _held_copies_dir() -> Path:
@@ -219,21 +224,21 @@ def delivery_target(user_id: int | None, username: str | None) -> str:
         path = config.get("BOOKLORE_PATH_ID", "", user_id=user_id)
         return f"booklore:{library}:{path}"
     folder = f"folder:{get_destination(is_audiobook=False, user_id=user_id, username=username)}"
-    templates = (config.get(key, "", user_id=user_id) for key in _USER_TEMPLATE_KEYS)
+    templates = (
+        config.get(key, "", user_id=user_id) for key in ("TEMPLATE_RENAME", "TEMPLATE_ORGANIZE")
+    )
     if any(isinstance(template, str) and "{user}" in template.lower() for template in templates):
         # File names carry the user, so each user is a target of their own.
         return f"{folder}|user:{username or user_id}"
     return folder
 
 
-def _copy_path(source: Path, target_dir: Path) -> Path:
-    run_blocking_io(target_dir.mkdir, parents=True, exist_ok=True)
-    target = target_dir / source.name
+def _copy_path(source: Path, target: Path) -> None:
+    run_blocking_io(target.parent.mkdir, parents=True, exist_ok=True)
     if run_blocking_io(source.is_dir):
         run_blocking_io(shutil.copytree, source, target)
     else:
         run_blocking_io(shutil.copy2, source, target)
-    return target
 
 
 def _remove_path(path: Path) -> None:
@@ -286,7 +291,6 @@ class WantedScheduler:
         cancel_task: Callable[[str], bool] | None = None,
         on_change: Callable[[int | None], None] | None = None,
     ) -> None:
-        """Wire the scheduler to its store, the download queue and change listeners."""
         self._service = service
         self._user_db = user_db
         self._resolve_auth_mode = resolve_auth_mode
@@ -372,11 +376,8 @@ class WantedScheduler:
         """Match the newest releases of indexer feeds against every waiting bookmark."""
         interval = feed_interval_minutes()
         now = time.monotonic()
-        if interval <= 0 or (
-            self._feed_checked_at is not None and now - self._feed_checked_at < interval * 60
-        ):
-            return
-        if self._user_searched_recently():
+        due = self._feed_checked_at is None or now - self._feed_checked_at >= interval * 60
+        if interval <= 0 or not due or self._user_searched_recently():
             return
         self._feed_checked_at = now
         sources = [source for source in self._available_sources() if source in _FEED_SOURCES]
@@ -436,7 +437,7 @@ class WantedScheduler:
             return
         capped = (
             f"; only the first {MAX_WATCH_BOOKS} of {total} are watched"
-            if (total > len(books))
+            if total > len(books)
             else ""
         )
         keys = [book_key(book) for book in books]
@@ -504,7 +505,7 @@ class WantedScheduler:
         pending = self._pending_subscribers(wanted_id)
         sources = [source for source in feed_sources if self._users_allowed(pending, source)]
         candidates = [release for release in candidates if release.source in sources]
-        if not pending or not candidates:
+        if not candidates:
             return
         prefs = self._preferences(pending, sources)
         picked = pick_releases(
@@ -549,17 +550,10 @@ class WantedScheduler:
         return since_user_search is not None and since_user_search < USER_SEARCH_GRACE_SECONDS
 
     def _should_yield(self, item: dict[str, Any]) -> bool:
-        from shelfmark.download import warmup
-
-        since_user_search = warmup.seconds_since_user_search()
         overdue = (
             datetime.now(UTC) - datetime.fromisoformat(item["next_search_at"])
         ).total_seconds()
-        if (
-            since_user_search is not None
-            and since_user_search < USER_SEARCH_GRACE_SECONDS
-            and overdue < _MAX_YIELD_SECONDS
-        ):
+        if overdue < _MAX_YIELD_SECONDS and self._user_searched_recently():
             return True
         now = time.monotonic()
         while self._searches and now - self._searches[0] > _RATE_WINDOW_SECONDS:
@@ -603,7 +597,6 @@ class WantedScheduler:
         return policies
 
     def _cancel_unwanted(self) -> None:
-        """Cancel downloads of items nobody wants any more."""
         if self._cancel_task is None or self._task_lookup is None:
             return
         with self._delivery_lock:
@@ -625,7 +618,7 @@ class WantedScheduler:
             self._park(item["id"])
 
     def _park(self, wanted_id: int) -> None:
-        """Stop a cycle while the wanted list is off; it searches again once back on."""
+        """Drop the running cycle and make the item due for a fresh search."""
         self._cycles.pop(wanted_id, None)
         parked = self._service.update_item(
             wanted_id,
@@ -638,48 +631,45 @@ class WantedScheduler:
 
     def _reconcile_downloads(self) -> None:
         """Finish attempts whose end the terminal hook missed (a crash in it, a lost task)."""
-        if self._task_lookup is None:
+        task_lookup = self._task_lookup
+        if task_lookup is None:
             return
         # Download endings arrive on other threads; reconcile must not interleave with one.
         with self._terminal_lock:
-            self._reconcile_downloads_locked(self._task_lookup)
+            for item in self._service.items_in_state(STATE_DOWNLOADING):
+                task_id = item.get("current_task_id")
+                if not task_id:
+                    self._reconcile_extras(item["id"], task_lookup)
+                    if not self._deliveries_in_flight(item["id"]):
+                        self._settle_deliveries(item)
+                    continue
+                status, task = task_lookup(task_id)
+                if status is None or getattr(task, "wanted_id", None) != item["id"]:
+                    logger.warning(
+                        "Wanted: task %s of %s vanished; moving on", task_id, item["title"]
+                    )
+                    self._service.finish_attempt(
+                        item["id"], task_id, ATTEMPT_CANCELLED, "Task lost"
+                    )
+                    self._service.update_item(
+                        item["id"],
+                        expected_state=STATE_DOWNLOADING,
+                        state=STATE_SEARCHING,
+                        current_task_id=None,
+                    )
+                    self._forget_task(task_id)
+                elif status in TERMINAL_QUEUE_STATUSES:
+                    self.on_task_terminal(task_id, status, task)
 
-    def _reconcile_downloads_locked(
-        self, task_lookup: Callable[[str], tuple[QueueStatus | None, Any]]
+    def _reconcile_extras(
+        self, wanted_id: int, task_lookup: Callable[[str], tuple[QueueStatus | None, Any]]
     ) -> None:
-        for item in self._service.items_in_state(STATE_DOWNLOADING):
-            task_id = item.get("current_task_id")
-            if not task_id:
-                self._reconcile_extras(item["id"])
-                if not self._deliveries_in_flight(item["id"]):
-                    self._settle_deliveries(item)
-                continue
-            status, task = task_lookup(task_id)
-            if status is None or getattr(task, "wanted_id", None) != item["id"]:
-                logger.warning("Wanted: task %s of %s vanished; moving on", task_id, item["title"])
-                self._service.finish_attempt(item["id"], task_id, ATTEMPT_CANCELLED, "Task lost")
-                self._service.update_item(
-                    item["id"],
-                    expected_state=STATE_DOWNLOADING,
-                    state=STATE_SEARCHING,
-                    current_task_id=None,
-                )
-                self._forget_task(task_id)
-            elif status in TERMINAL_QUEUE_STATUSES:
-                self.on_task_terminal(task_id, status, task)
-
-    def _reconcile_extras(self, wanted_id: int) -> None:
-        if self._task_lookup is None:
-            return
         with self._delivery_lock:
             extra_ids = [tid for tid, extra in self._extras.items() if extra[0] == wanted_id]
         for extra_id in extra_ids:
-            status, task = self._task_lookup(extra_id)
+            status, task = task_lookup(extra_id)
             if status is None:
-                with self._delivery_lock:
-                    extra = self._extras.pop(extra_id, None)
-                if extra is not None:
-                    _remove_path(extra[2].parent)
+                self._forget_task(extra_id)
             elif status in TERMINAL_QUEUE_STATUSES:
                 self.on_task_terminal(extra_id, status, task)
 
@@ -697,16 +687,9 @@ class WantedScheduler:
         cycle = self._cycles.get(wanted_id)
         if cycle is None:
             # No cycle in memory (a restart or a crash mid-search): start over later.
-            self._end_cycle(item, found_nothing=True, source_errors=True)
+            self._end_cycle(item, source_errors=True)
         elif time.monotonic() - cycle.started > CANDIDATES_MAX_AGE_SECONDS:
-            self._cycles.pop(wanted_id, None)
-            self._service.update_item(
-                wanted_id,
-                expected_state=STATE_SEARCHING,
-                state=STATE_WAITING,
-                next_search_at=now_utc_iso(),
-            )
-            self._changed(wanted_id)
+            self._park(wanted_id)
         else:
             self._try_next(wanted_id)
 
@@ -733,7 +716,6 @@ class WantedScheduler:
         self, subscribers: list[dict[str, Any]], source: str
     ) -> list[dict[str, Any]]:
         auth_mode = self._resolve_auth_mode()
-        # An admin approved the bookmark (an approved request): it may download.
         return [
             sub
             for sub in subscribers
@@ -742,7 +724,6 @@ class WantedScheduler:
         ]
 
     def _approved_by_admin(self, approver_id: object) -> bool:
-        """Whether an approval still holds: its admin still exists and is still an admin."""
         user_id = _positive_int(approver_id)
         if user_id is None or self._user_db is None:
             return False
@@ -810,17 +791,6 @@ class WantedScheduler:
             series_name=book_data.get("series_name"),
             release_date=book_data.get("release_date"),
         )
-
-    @staticmethod
-    def _picker_book(book_data: dict[str, Any], book: BookMetadata) -> dict[str, Any]:
-        enriched = dict(book_data)
-        for key in ("search_title", "search_author", "subtitle", "series_name"):
-            value = getattr(book, key, None)
-            if value and not enriched.get(key):
-                enriched[key] = value
-        if book.authors and not enriched.get("authors"):
-            enriched["authors"] = list(book.authors)
-        return enriched
 
     # -- cycle -----------------------------------------------------------------------
 
@@ -924,7 +894,6 @@ class WantedScheduler:
         self._searches.append(time.monotonic())
         releases, answered, failed = self._search(sources, book, pending)
         prefs = self._preferences(pending, sources)
-        formats = prefs.preferred_formats
         picked = pick_releases(
             releases,
             item["book_data"],
@@ -944,17 +913,18 @@ class WantedScheduler:
         self._service.update_item(
             wanted_id, searched_sources={"answered": answered, "failed": failed}
         )
-        picked, hold = self._hold_for_format(picked, pending, formats)
+        picked, hold = self._hold_for_format(picked, pending, prefs.preferred_formats)
         if not picked:
-            result = f"Searched {len(answered)} source(s), no matching release"
-            if hold is not None:
-                result = hold.message
+            result = (
+                hold.message
+                if hold is not None
+                else f"Searched {len(answered)} source(s), no matching release"
+            )
             if failed:
                 result += f"; {', '.join(failed)} failed"
             # A source failing again is down, not blipping: back off as usual.
             self._end_cycle(
                 item,
-                found_nothing=True,
                 source_errors=bool(set(failed) - previously_failed),
                 result=result,
                 search_by=hold.until if hold is not None else None,
@@ -970,7 +940,13 @@ class WantedScheduler:
         self, wanted_id: int, book_data: dict[str, Any], book: BookMetadata
     ) -> dict[str, Any]:
         """Keep what the metadata adds (release date, series, authors) for later matching."""
-        enriched = self._picker_book(book_data, book)
+        enriched = dict(book_data)
+        for key in ("search_title", "search_author", "subtitle", "series_name"):
+            value = getattr(book, key, None)
+            if value and not enriched.get(key):
+                enriched[key] = value
+        if book.authors and not enriched.get("authors"):
+            enriched["authors"] = list(book.authors)
         if book.release_date:
             enriched["release_date"] = book.release_date
         if enriched != book_data:
@@ -1032,12 +1008,12 @@ class WantedScheduler:
         return [], _FormatHold(until=until, message=message)
 
     def _preferences(self, pending: list[dict[str, Any]], sources: list[str]) -> PickerPreferences:
-        formats = preferred_formats()[0]
+        formats, excluded = preferred_formats()
         return PickerPreferences(
             # Archives are unpacked to their books, so they are no format choice.
             supported_formats=supported_formats() & {*formats, *ARCHIVE_FORMATS},
             preferred_formats=formats,
-            excluded_formats=preferred_formats()[1],
+            excluded_formats=excluded,
             source_order=tuple(sources),
             languages=tuple(self._search_languages(pending) or ()),
         )
@@ -1117,8 +1093,7 @@ class WantedScheduler:
         from shelfmark.core import search_deadline
         from shelfmark.core.release_search import search_source_releases
 
-        # None means "every language"; said explicitly, or the search would fall back to
-        # the first subscriber's default languages.
+        # Without an explicit "all" the search falls back to the user's default languages.
         languages = self._search_languages(pending) or ["all"]
         user_id = pending[0].get("user_id")
         releases: list[Release] = []
@@ -1151,7 +1126,7 @@ class WantedScheduler:
             self._cycles.pop(wanted_id, None)
             return
         if cycle is None:
-            self._end_cycle(item, found_nothing=True, source_errors=True)
+            self._end_cycle(item, source_errors=True)
             return
         if not wanted_enabled():
             # Switched off while this pass searched.
@@ -1161,31 +1136,31 @@ class WantedScheduler:
         while cycle.releases:
             release = cycle.releases.pop(0)
             allowed = self._users_allowed(pending, release.source)
-            if not allowed:
-                continue
-            owner = allowed[0]
-            if self._queue_attempt(item, release, owner, cycle.number):
+            if allowed and self._queue_attempt(item, release, allowed[0], cycle.number):
                 return
         self._cycles.pop(wanted_id, None)
-        if cycle.origin != "search":
-            # A user's pick keeps the planned search; a feed find makes a full search due.
-            feed = cycle.origin == "feed"
-            self._service.update_item(
-                wanted_id,
-                expected_state=STATE_SEARCHING,
-                state=STATE_WAITING,
-                current_task_id=None,
-                last_result="The release from the feed failed"
-                if feed
-                else "The picked release failed",
-                **({"next_search_at": now_utc_iso()} if feed else {}),
-            )
-            self._changed(wanted_id)
+        if cycle.origin == "search":
+            result = "Every matching release failed"
+            if cycle.queue_error:
+                result = f"{result}; could not queue: {cycle.queue_error}"
+            self._end_cycle(item, source_errors=False, result=result)
             return
-        result = "Every matching release failed"
-        if cycle.queue_error:
-            result = f"{result}; could not queue: {cycle.queue_error}"
-        self._end_cycle(item, found_nothing=True, source_errors=False, result=result)
+        # A user's pick keeps the planned search; a feed find makes a full search due.
+        if cycle.origin == "feed":
+            changes = {
+                "last_result": "The release from the feed failed",
+                "next_search_at": now_utc_iso(),
+            }
+        else:
+            changes = {"last_result": "The picked release failed"}
+        self._service.update_item(
+            wanted_id,
+            expected_state=STATE_SEARCHING,
+            state=STATE_WAITING,
+            current_task_id=None,
+            **changes,
+        )
+        self._changed(wanted_id)
 
     def _queue_attempt(
         self, item: dict[str, Any], release: Release, owner: dict[str, Any], cycle_number: int
@@ -1212,14 +1187,13 @@ class WantedScheduler:
             indexer=release.indexer,
         )
         payload = release_to_queue_payload(release, item["book_data"])
-        username = owner.get("username")
         with self._delivery_lock:
             self._payloads[release.source_id] = payload
         success, error = self._queue_release(
             payload,
             0,
             user_id=_positive_int(owner.get("user_id")),
-            username=username,
+            username=owner.get("username"),
             wanted_id=wanted_id,
         )
         if not success and self._task_lookup is not None:
@@ -1255,7 +1229,6 @@ class WantedScheduler:
         self,
         item: dict[str, Any],
         *,
-        found_nothing: bool,
         source_errors: bool,
         result: str | None = None,
         search_by: datetime | None = None,
@@ -1267,15 +1240,13 @@ class WantedScheduler:
         delay = hours[min(level, len(hours) - 1)]
         if source_errors:
             delay = min(delay, hours[0])
-        elif found_nothing:
+        else:
             level += 1
         if search_by is not None:
             delay = max(min(delay, (search_by - datetime.now(UTC)).total_seconds() / 3600), 0)
         updated = self._service.update_item(
             item["id"],
-            expected_state=item["state"]
-            if item["state"] in (STATE_SEARCHING, STATE_DOWNLOADING)
-            else None,
+            expected_state=item["state"],
             state=STATE_WAITING,
             current_task_id=None,
             backoff_level=level,
@@ -1286,52 +1257,43 @@ class WantedScheduler:
             self._changed(item["id"])
 
     def _notify_grabbed(self, item: dict[str, Any], release: Release) -> None:
-        from shelfmark.core.notifications import (
-            NotificationContext,
-            NotificationEvent,
-            notify_admin,
-            notify_user,
-        )
+        from shelfmark.core.notifications import NotificationEvent
         from shelfmark.release_sources import get_source_display_name
 
-        context = NotificationContext(
-            event=NotificationEvent.WANTED_GRABBED,
-            title=item["title"],
-            author=item.get("author") or "Unknown author",
-            content_type=WANTED_CONTENT_TYPE,
-            detail=get_source_display_name(release.source),
-        )
         # Only those this source may serve get this download.
         receivers = self._users_allowed(self._pending_subscribers(item["id"]), release.source)
-        user_ids = {_positive_int(sub.get("user_id")) for sub in receivers}
-        try:
-            notify_admin(NotificationEvent.WANTED_GRABBED, context)
-            for user_id in user_ids - {None}:
-                notify_user(user_id, NotificationEvent.WANTED_GRABBED, context)
-        except (RuntimeError, TypeError, ValueError) as exc:
-            logger.warning("Wanted: could not send notifications for %s: %s", item["title"], exc)
+        self._notify(
+            NotificationEvent.WANTED_GRABBED,
+            item,
+            [sub.get("user_id") for sub in receivers],
+            detail=get_source_display_name(release.source),
+        )
 
     def _notify_obtained(
         self, item: dict[str, Any], user_ids: list[int | None], *, reason: str
     ) -> None:
-        from shelfmark.core.notifications import (
-            NotificationContext,
-            NotificationEvent,
-            notify_admin,
-            notify_user,
-        )
+        from shelfmark.core.notifications import NotificationEvent
+
+        detail = "is already in your library" if reason == "in_library" else "was downloaded"
+        self._notify(NotificationEvent.WANTED_OBTAINED, item, user_ids, detail=detail)
+
+    @staticmethod
+    def _notify(
+        event: NotificationEvent, item: dict[str, Any], user_ids: list[Any], *, detail: str
+    ) -> None:
+        from shelfmark.core.notifications import NotificationContext, notify_admin, notify_user
 
         context = NotificationContext(
-            event=NotificationEvent.WANTED_OBTAINED,
+            event=event,
             title=item["title"],
             author=item.get("author") or "Unknown author",
             content_type=WANTED_CONTENT_TYPE,
-            detail="is already in your library" if reason == "in_library" else "was downloaded",
+            detail=detail,
         )
         try:
-            notify_admin(NotificationEvent.WANTED_OBTAINED, context)
+            notify_admin(event, context)
             for user_id in {_positive_int(user_id) for user_id in user_ids} - {None}:
-                notify_user(user_id, NotificationEvent.WANTED_OBTAINED, context)
+                notify_user(user_id, event, context)
         except (RuntimeError, TypeError, ValueError) as exc:
             logger.warning("Wanted: could not send notifications for %s: %s", item["title"], exc)
 
@@ -1381,14 +1343,11 @@ class WantedScheduler:
                 self._deliver(item, task)
             self._forget_task(task_id)
             return
-        message = getattr(task, "status_message", None)
-        message = message.strip() if isinstance(message, str) and message.strip() else None
-        stalled = (message or "").startswith(_STALLED_MESSAGE_PREFIX)
-
+        message = _status_message(task)
         if status == QueueStatus.COMPLETE:
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_COMPLETE)
             self._deliver(item, task)
-        elif status == QueueStatus.CANCELLED and not stalled:
+        elif _user_cancelled(status, message):
             # Cancelling a wanted download rejects that release, e.g. the wrong book.
             self._service.finish_attempt(wanted_id, task_id, ATTEMPT_REJECTED, message)
             self._next_attempt(wanted_id, "Last release was cancelled")
@@ -1398,7 +1357,6 @@ class WantedScheduler:
             # Waits like a book that was not found, so a lasting fault backs off.
             self._end_cycle(
                 {**item, "state": STATE_DOWNLOADING},
-                found_nothing=True,
                 source_errors=False,
                 result=f"Download could not be delivered: {message or 'unknown error'}",
             )
@@ -1424,8 +1382,8 @@ class WantedScheduler:
     def _failure_is_local(task: Any, message: str | None) -> bool:
         """Whether a failure happened on our side rather than with the release.
 
-        A release that downloads but holds no usable book still fails in post-processing;
-        only failures naming our destination or output count as local.
+        A release without a usable book also fails in post-processing, so only messages
+        naming our destination, output or download client count as local.
         """
         if getattr(task, "last_error_type", None) not in _RELEASE_FAILURE_TYPES:
             return True
@@ -1490,9 +1448,10 @@ class WantedScheduler:
         held: list[tuple[list[dict[str, Any]], Path]] = []
         try:
             for index, group in enumerate(extra_groups, start=1):
-                target_dir = _held_copies_dir() / f"{digest}-{index}"
-                held.append((group, target_dir / path.name))
-                _copy_path(path, target_dir)
+                copy = _held_copies_dir() / f"{digest}-{index}" / path.name
+                # Listed first, so a partial copy is cleaned up too.
+                held.append((group, copy))
+                _copy_path(path, copy)
         except OSError:
             for _group, copy in held:
                 _remove_path(copy.parent)
@@ -1500,10 +1459,10 @@ class WantedScheduler:
         with self._delivery_lock:
             # The download may have been cancelled while we copied.
             active = task_id in self._payloads
-            previous = self._held.pop(task_id, []) if active else held
+            discarded = self._held.pop(task_id, []) if active else held
             if active:
                 self._held[task_id] = held
-        for _group, copy in previous:
+        for _group, copy in discarded:
             _remove_path(copy.parent)
         if active:
             logger.info(
@@ -1583,16 +1542,14 @@ class WantedScheduler:
         # Delivered, or the subscribers stay waiting for a download of their own.
         _remove_path(copy.parent)
         item = self._service.get_item(wanted_id)
-        if status == QueueStatus.COMPLETE and item is not None:
+        if item is None:
+            return
+        if status == QueueStatus.COMPLETE:
             self._service.mark_delivered(wanted_id, user_ids, task_id)
             self._notify_obtained(item, user_ids, reason="downloaded")
-        else:
-            message = getattr(task, "status_message", None)
-            stalled = isinstance(message, str) and message.startswith(_STALLED_MESSAGE_PREFIX)
-            if status == QueueStatus.CANCELLED and not stalled and item is not None:
-                self._reject_delivered_release(item, task_id, task)
-        if item is not None:
-            self._settle_deliveries(item)
+        elif _user_cancelled(status, _status_message(task)):
+            self._reject_delivered_release(item, task_id, task)
+        self._settle_deliveries(item)
 
     def _reject_delivered_release(self, item: dict[str, Any], extra_id: str, task: Any) -> None:
         """A cancelled delivery rejects its release, as cancelling the download would."""

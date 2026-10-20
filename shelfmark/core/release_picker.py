@@ -19,7 +19,7 @@ from shelfmark.core.text_match import COLLECTION_MARKERS, PACKAGING_MARKERS, STO
 from shelfmark.core.wanted_service import release_attempt_keys
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from shelfmark.release_sources import Release
 
@@ -188,13 +188,12 @@ def book_author_candidates(book: dict[str, Any]) -> list[str]:
     raw_authors = book.get("authors")
     authors: list[object] = raw_authors if isinstance(raw_authors, list) else []
     raw_author = book.get("author")
-    author_text = raw_author if isinstance(raw_author, str) else ""
-    parts = [part.strip() for part in author_text.split(",") if part.strip()]
+    parts = raw_author.split(",") if isinstance(raw_author, str) else []
     return _collect_normalized([book.get("search_author"), *authors, *parts])
 
 
 def _release_author(release: Release) -> str | None:
-    author = release.extra.get("author") if isinstance(release.extra, dict) else None
+    author = release.extra.get("author")
     return author if isinstance(author, str) and author.strip() else None
 
 
@@ -204,7 +203,7 @@ def _has_author_match(release: Release, author_candidates: list[str]) -> bool:
         return False
     release_tokens = set(_normalize_match_text(author).split(" "))
     return any(
-        candidate.split(" ") and all(token in release_tokens for token in candidate.split(" "))
+        all(token in release_tokens for token in candidate.split(" "))
         for candidate in author_candidates
     )
 
@@ -253,23 +252,23 @@ def _numbers(words: Iterable[str]) -> set[int]:
     }
 
 
-def _release_words(title: str) -> list[str]:
+def _release_words(title: str) -> set[str]:
     title = _SERIES_MARKER_PATTERN.sub(" ", title).strip()
     if " " not in title:
         # Only scene-style names ("Dune.1965.eBook-AlkPub") carry a group suffix; in a
         # spaced title the hyphen belongs to a word ("Spider-Man").
         title = _RELEASE_GROUP_PATTERN.sub(" ", title)
-    return _words(title)
+    return set(_words(title))
 
 
-def _book_words(book: dict[str, Any], author_candidates: list[str]) -> set[str]:
+def _book_words(book: dict[str, Any]) -> set[str]:
     """Every word the book's own metadata accounts for."""
     words: set[str] = set()
     texts = [*_raw_titles(book), book.get("series_name"), book.get("subtitle")]
     for text in [*texts, *_raw_author_names(book)]:
         for variant in _word_variants(text):
             words |= set(variant)
-    for author in author_candidates:
+    for author in book_author_candidates(book):
         words |= set(author.split(" "))
     return words
 
@@ -298,9 +297,18 @@ def _book_numbers(book: dict[str, Any]) -> set[int]:
     return numbers
 
 
+def _title_found_in(release_words: set[str], title: str) -> bool:
+    for variant in _word_variants(title):
+        title_words = _significant(variant)
+        present = sum(1 for word in title_words if word in release_words)
+        if title_words and present / len(title_words) >= _TITLE_MATCH_THRESHOLD:
+            return True
+    return False
+
+
 def may_name_the_book(release: Release, book: dict[str, Any]) -> bool:
     """Cheap pre-check: a release naming the book shares a significant title word with it."""
-    release_words = set(_release_words(release.title))
+    release_words = _release_words(release.title)
     return any(
         release_words.intersection(_significant(variant))
         for title in _raw_titles(book)
@@ -308,22 +316,15 @@ def may_name_the_book(release: Release, book: dict[str, Any]) -> bool:
     )
 
 
-def names_the_book(release: Release, book: dict[str, Any]) -> bool:
-    """Whether a release is this book rather than another work, volume or bundle."""
-    return book_mismatch(release, book) is None
-
-
 def book_mismatch(release: Release, book: dict[str, Any]) -> str | None:
     """Why a release is not this book (another work, volume or bundle); None if it is."""
     titles = _raw_titles(book)
     if not titles:
         return "The bookmark has no title"
-    author_candidates = book_author_candidates(book)
     release_words = _release_words(release.title)
-    release_word_set = set(release_words)
-    book_words = _book_words(book, author_candidates)
+    book_words = _book_words(book)
 
-    if (release_word_set & COLLECTION_MARKERS) - book_words:
+    if (release_words & COLLECTION_MARKERS) - book_words:
         return "A collection or bundle"
     # A word the book's own metadata uses ("Xi" in an author's name) is no numeral.
     release_numbers = _numbers(
@@ -331,22 +332,11 @@ def book_mismatch(release: Release, book: dict[str, Any]) -> str | None:
     )
     if release_numbers - _book_numbers(book):
         return "Another volume or part"
-
-    def matches(title: str) -> bool:
-        for variant in _word_variants(title):
-            title_words = _significant(variant)
-            if not title_words:
-                continue
-            present = sum(1 for word in title_words if word in release_word_set)
-            if present / len(title_words) >= _TITLE_MATCH_THRESHOLD:
-                return True
-        return False
-
-    if not any(matches(title) for title in titles):
+    if not any(_title_found_in(release_words, title) for title in titles):
         return "Title does not match"
     extra = {
         word
-        for word in release_word_set
+        for word in release_words
         if word.isalpha()
         and len(word) >= _MIN_TOKEN_LENGTH
         and word not in STOPWORDS
@@ -365,7 +355,7 @@ def book_mismatch(release: Release, book: dict[str, Any]) -> str | None:
     return None
 
 
-def language_matches(release_language: str | None, languages: list[str] | None) -> bool:
+def language_matches(release_language: str | None, languages: Sequence[str] | None) -> bool:
     """Port of ``releaseLanguageMatchesFilter``: unknown or unfiltered languages pass."""
     if not release_language or not languages or LANGUAGE_OPTION_ALL in languages:
         return True
@@ -415,7 +405,7 @@ def rejection_reason(
     fmt = _format_of(release)
     if fmt is not None and (fmt not in prefs.supported_formats or fmt in prefs.excluded_formats):
         return f"{fmt.upper()} is not a wanted format"
-    if not language_matches(release.language, list(prefs.languages) or None):
+    if not language_matches(release.language, prefs.languages):
         return "Not in a wanted language"
     if release.size_bytes is not None and release.size_bytes > MAX_EBOOK_SIZE_BYTES:
         return "Too large for an ebook"

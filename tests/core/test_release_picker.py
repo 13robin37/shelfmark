@@ -6,8 +6,8 @@ import pytest
 
 from shelfmark.core.release_picker import (
     PickerPreferences,
+    book_mismatch,
     language_matches,
-    names_the_book,
     pick_releases,
     release_match_key,
     title_match_score,
@@ -56,32 +56,32 @@ def test_title_match_score_matches_the_frontend(title, candidate, expected):
         "Dune 9780441172719",
     ],
 )
-def test_names_the_book_accepts_the_same_work(title):
-    assert names_the_book(_release(title), BOOK)
+def test_book_mismatch_accepts_the_same_work(title):
+    assert book_mismatch(_release(title), BOOK) is None
 
 
 @pytest.mark.parametrize(
     "title",
     ["Dune Messiah", "Children of Dune", "Dune Trilogy Box Set", "The Road to Dune", "Arrakis"],
 )
-def test_names_the_book_rejects_other_works_and_bundles(title):
-    assert not names_the_book(_release(title), BOOK)
+def test_book_mismatch_rejects_other_works_and_bundles(title):
+    assert book_mismatch(_release(title), BOOK) is not None
 
 
-def test_names_the_book_rejects_a_contradicting_author():
-    assert not names_the_book(_release(extra={"author": "Brian Herbert"}), BOOK)
-    assert names_the_book(_release(extra={"author": "Herbert, Frank"}), BOOK)
-    assert names_the_book(_release(extra={"author": "Herbert"}), BOOK)
+def test_book_mismatch_rejects_a_contradicting_author():
+    assert book_mismatch(_release(extra={"author": "Brian Herbert"}), BOOK) is not None
+    assert book_mismatch(_release(extra={"author": "Herbert, Frank"}), BOOK) is None
+    assert book_mismatch(_release(extra={"author": "Herbert"}), BOOK) is None
 
 
-def test_names_the_book_allows_the_subtitle():
+def test_book_mismatch_allows_the_subtitle():
     book = {
         **BOOK,
         "title": "Sapiens",
         "subtitle": "A Brief History of Humankind",
         "author": "Yuval Noah Harari",
     }
-    assert names_the_book(_release("Sapiens: A Brief History of Humankind"), book)
+    assert book_mismatch(_release("Sapiens: A Brief History of Humankind"), book) is None
 
 
 @pytest.mark.parametrize(
@@ -184,8 +184,8 @@ def test_pick_releases_prefers_seeded_torrents():
         ({"title": "Dune"}, "Dune - Book 2"),
     ],
 )
-def test_names_the_book_rejects_another_volume(book, title):
-    assert not names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+def test_book_mismatch_rejects_another_volume(book, title):
+    assert book_mismatch(_release(title), {**book, "provider": "x", "provider_id": "1"}) is not None
 
 
 @pytest.mark.parametrize(
@@ -211,8 +211,8 @@ def test_names_the_book_rejects_another_volume(book, title):
         ),
     ],
 )
-def test_names_the_book_accepts_numbers_markers_and_scripts_the_book_carries(book, title):
-    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+def test_book_mismatch_accepts_numbers_markers_and_scripts_the_book_carries(book, title):
+    assert book_mismatch(_release(title), {**book, "provider": "x", "provider_id": "1"}) is None
 
 
 def test_format_preference_beats_title_variants():
@@ -266,13 +266,13 @@ def test_match_key_only_for_sources_with_unstable_ids():
         ),
     ],
 )
-def test_names_the_book_handles_accents_apostrophes_and_author_words(book, title):
-    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+def test_book_mismatch_handles_accents_apostrophes_and_author_words(book, title):
+    assert book_mismatch(_release(title), {**book, "provider": "x", "provider_id": "1"}) is None
 
 
 def test_roman_volume_numbers_count_as_numbers():
     book = {"title": "Saga, Vol. I", "provider": "x", "provider_id": "1", "series_position": 1}
-    assert not names_the_book(_release("Saga, Vol. II"), book)
+    assert book_mismatch(_release("Saga, Vol. II"), book) is not None
 
 
 @pytest.mark.parametrize(
@@ -294,8 +294,8 @@ def test_roman_volume_numbers_count_as_numbers():
         ({"title": "Dune", "series_position": 1, "series_count": 6}, "Dune (Book I of VI)"),
     ],
 )
-def test_names_the_book_accepts_every_apostrophe_spelling(book, title):
-    assert names_the_book(_release(title), {**book, "provider": "x", "provider_id": "1"})
+def test_book_mismatch_accepts_every_apostrophe_spelling(book, title):
+    assert book_mismatch(_release(title), {**book, "provider": "x", "provider_id": "1"}) is None
 
 
 def test_release_author_is_compared_without_accents():
@@ -305,7 +305,7 @@ def test_release_author_is_compared_without_accents():
         "provider": "x",
         "provider_id": "1",
     }
-    assert names_the_book(_release("Der Schwarm", extra={"author": "Frank Schätzing"}), book)
+    assert book_mismatch(_release("Der Schwarm", extra={"author": "Frank Schätzing"}), book) is None
 
 
 def test_rejection_reasons_say_why_a_release_is_skipped():

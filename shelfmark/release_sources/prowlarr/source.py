@@ -1385,7 +1385,7 @@ class ProwlarrSource(ReleaseSource):
         client = self._get_client()
         if client is None:
             return None
-        # Feed items are cached like search results but rarely read back; drop stale ones.
+        # Converting caches every feed item, and few are ever read back.
         cleanup_expired()
         categories = [3030] if content_type == "audiobook" else [7000]
         try:
@@ -1433,9 +1433,7 @@ class ProwlarrSource(ReleaseSource):
             result_with_seed = _apply_indexer_seed_settings(result, seed_settings)
             idx_id = _coerce_indexer_id(result_with_seed.get("indexerId"))
             release = _prowlarr_result_to_release(
-                result_with_seed,
-                content_type,
-                enable_format_detection=idx_id is not None and idx_id in enriched,
+                result_with_seed, content_type, enable_format_detection=idx_id in enriched
             )
             if idx_id is not None and idx_id in indexer_priority:
                 release.extra["indexer_priority"] = indexer_priority[idx_id]
