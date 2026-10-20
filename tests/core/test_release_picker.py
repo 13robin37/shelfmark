@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from shelfmark.core.release_picker import (
@@ -230,3 +232,10 @@ def test_rejection_reasons_say_why_a_release_is_skipped():
     assert rejection_reason(_release("Dune"), BOOK, prefs, blocked) == (
         "Failed or was cancelled before"
     )
+
+
+def test_odd_release_titles_are_matched_quickly_and_without_errors():
+    started = time.monotonic()
+    for title in ("-" + "a" * 200_000 + "!", "(#" + "1" * 200_000, "(" + "# " * 100_000, "Dune ²"):
+        assert book_mismatch(_release(title), BOOK) is not None
+    assert time.monotonic() - started < 2

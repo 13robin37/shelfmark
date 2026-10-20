@@ -313,6 +313,8 @@ class WantedScheduler:
         self._held: dict[str, list[tuple[list[dict[str, Any]], Path]]] = {}
         # Extra delivery task id -> (wanted id, subscriber ids it delivers to, its copy).
         self._extras: dict[str, tuple[int, list[int | None], Path]] = {}
+        # Task id of a release a user picked by hand -> that user; it serves only them.
+        self._picked_by: dict[str, int | None] = {}
         # The terminal hook (worker / request threads) and reconciliation (this thread)
         # may see the same ending; only one may act on it.
         self._terminal_lock = threading.RLock()
@@ -1187,8 +1189,11 @@ class WantedScheduler:
             indexer=release.indexer,
         )
         payload = release_to_queue_payload(release, item["book_data"])
+        cycle = self._cycles.get(wanted_id)
         with self._delivery_lock:
             self._payloads[release.source_id] = payload
+            if cycle is not None and cycle.origin == "manual":
+                self._picked_by[release.source_id] = _positive_int(owner.get("user_id"))
         success, error = self._queue_release(
             payload,
             0,
@@ -1260,8 +1265,7 @@ class WantedScheduler:
         from shelfmark.core.notifications import NotificationEvent
         from shelfmark.release_sources import get_source_display_name
 
-        # Only those this source may serve get this download.
-        receivers = self._users_allowed(self._pending_subscribers(item["id"]), release.source)
+        receivers = self._receivers(item["id"], release.source, release.source_id)
         self._notify(
             NotificationEvent.WANTED_GRABBED,
             item,
@@ -1412,6 +1416,18 @@ class WantedScheduler:
 
     # -- delivery ------------------------------------------------------------------
 
+    def _receivers(self, wanted_id: int, source: str, task_id: str) -> list[dict[str, Any]]:
+        """Pending subscribers a download serves: those the source may serve.
+
+        A release picked by hand serves only the user who picked it; nobody else vetted it.
+        """
+        receivers = self._users_allowed(self._pending_subscribers(wanted_id), source)
+        with self._delivery_lock:
+            if task_id not in self._picked_by:
+                return receivers
+            picker = self._picked_by[task_id]
+        return [sub for sub in receivers if _positive_int(sub.get("user_id")) == picker]
+
     def _delivery_groups(
         self, wanted_id: int, task: Any
     ) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
@@ -1421,7 +1437,7 @@ class WantedScheduler:
         the user it runs for, who may have left since) and every other group.
         """
         source = str(getattr(task, "source", "") or "")
-        receivers = self._users_allowed(self._pending_subscribers(wanted_id), source)
+        receivers = self._receivers(wanted_id, source, str(getattr(task, "task_id", "") or ""))
         groups: dict[str, list[dict[str, Any]]] = {}
         for sub in receivers:
             target = delivery_target(_positive_int(sub.get("user_id")), sub.get("username"))
@@ -1472,6 +1488,7 @@ class WantedScheduler:
     def _forget_task(self, task_id: str) -> None:
         with self._delivery_lock:
             self._payloads.pop(task_id, None)
+            self._picked_by.pop(task_id, None)
             held = self._held.pop(task_id, [])
             extra = self._extras.pop(task_id, None)
         copies = [copy for _group, copy in held] + ([extra[2]] if extra else [])

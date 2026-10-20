@@ -990,7 +990,7 @@ def test_releases_are_evaluated_like_the_wanted_list_would(env):
 
 
 @pytest.mark.usefixtures("two_targets")
-def test_a_picked_release_downloads_for_every_subscriber(env, tmp_path):
+def test_a_picked_release_serves_only_the_user_who_picked_it(env, tmp_path):
     wanted_id = env.add()
     env.add(user=env.bob)
     env.service.update_item(wanted_id, next_search_at=LATER)
@@ -1005,8 +1005,11 @@ def test_a_picked_release_downloads_for_every_subscriber(env, tmp_path):
     assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
     _downloaded(env, wanted_id, tmp_path)
     env.finish(wanted_id, QueueStatus.COMPLETE)
-    # Bob's download lands in his target; Alice gets hers from a copy.
-    assert env.queued[-1][1] == env.alice["id"]
+    # Nobody vetted Bob's pick for Alice: no copy for her, she keeps waiting.
+    assert len(env.queued) == 1
+    assert not _held_copies(tmp_path)
+    assert env.pending(wanted_id) == [env.alice["id"]]
+    assert env.item(wanted_id)["state"] == STATE_WAITING
 
 
 def test_a_picked_release_needs_a_waiting_item(env):

@@ -84,9 +84,10 @@ _RELEASE_NOISE_TOKENS = frozenset(
 )
 
 # A series marker a release name adds, as in "Dune (Dune Chronicles #1)".
-_SERIES_MARKER_PATTERN = re.compile(r"\([^()]*#\s*\d+(?:\.\d+)?[^()]*\)")
+# Both patterns avoid backtracking: release titles come from users and indexers.
+_SERIES_MARKER_PATTERN = re.compile(r"\((?=[^()]*#\s*+\d)[^()]*+\)")
 # A scene release group suffix, as in "Dune.1965.eBook-AlkPub".
-_RELEASE_GROUP_PATTERN = re.compile(r"-[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$")
+_RELEASE_GROUP_PATTERN = re.compile(r"-(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]++$")
 _WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
 _APOSTROPHES = re.compile(r"['\u2019\u02bc]")
 # Volume numbers written as Roman numerals ("Vol. II"); I, V and X alone are too often
@@ -233,7 +234,8 @@ def _word_variants(text: object) -> list[list[str]]:
 
 
 def _number_of(word: str) -> int | None:
-    if word.isdigit():
+    # Longer numbers are no volumes or years anyway; int() refuses huge ones and "²".
+    if word.isdecimal() and len(word) <= 4:
         return int(word)
     return _ROMAN_NUMERALS.get(word)
 
