@@ -561,8 +561,6 @@ interface WantedSubscriber {
   delivered_at: string | null;
 }
 
-export type WantedAttemptStatus = 'queued' | 'complete' | 'error' | 'cancelled' | 'rejected';
-
 export interface WantedAttempt {
   id: number;
   cycle: number;
@@ -572,7 +570,7 @@ export interface WantedAttempt {
   format: string | null;
   size: string | null;
   indexer?: string | null;
-  status: WantedAttemptStatus;
+  status: 'queued' | 'complete' | 'error' | 'cancelled' | 'rejected';
   /** Only admins see error text; it can name trackers or carry download URLs. */
   error_message?: string | null;
   created_at: string | null;

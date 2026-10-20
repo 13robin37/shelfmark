@@ -1141,12 +1141,11 @@ export const listWantedWatches = async (): Promise<WantedWatch[]> => {
 export const watchForWanted = async (
   target: WantedWatchTarget,
   userId?: number | null,
-): Promise<WantedWatch> => {
-  const response = await fetchJSON<{ watch: WantedWatch }>(`${API.wanted}/watches`, {
+): Promise<void> => {
+  await fetchJSON<unknown>(`${API.wanted}/watches`, {
     method: 'POST',
     body: JSON.stringify(userId ? { ...target, user_id: userId } : target),
   });
-  return response.watch;
 };
 
 export const unwatchForWanted = async (watchId: number): Promise<void> => {
@@ -1164,10 +1163,10 @@ export const bookmarkAllForWanted = async (
     body: JSON.stringify(userId ? { ...target, user_id: userId } : target),
   });
 
-export const requestToWanted = async (requestId: number, adminNote?: string): Promise<void> => {
+export const requestToWanted = async (requestId: number): Promise<void> => {
   await fetchJSON<unknown>(
     `${API_BASE}/admin/requests/${encodeURIComponent(String(requestId))}/wanted`,
-    { method: 'POST', body: JSON.stringify(adminNote ? { admin_note: adminNote } : {}) },
+    { method: 'POST', body: JSON.stringify({}) },
   );
 };
 

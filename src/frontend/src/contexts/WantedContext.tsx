@@ -56,7 +56,6 @@ interface WantedContextValue {
   bookLanguages: Language[];
   defaultLanguageCodes: string[];
   stateFor: (book: Book) => WantedBookState | undefined;
-  /** ``languages`` overrides the viewer's default languages for this book. */
   toggle: (book: Book, languages?: string[] | null) => Promise<void>;
   remove: (item: WantedItem, scope?: 'all') => Promise<void>;
   searchNow: (item: WantedItem) => Promise<void>;
@@ -78,9 +77,7 @@ interface WantedContextValue {
   /** Bookmark new books of a series, author or list as they appear. */
   watch: (target: WantedWatchTarget, userId?: number | null) => Promise<void>;
   unwatch: (watch: WantedWatch) => Promise<void>;
-  /** Approve a book request by bookmarking it for the requester (admins). */
   approveRequestToWanted: (requestId: number, title: string) => Promise<void>;
-  refresh: () => Promise<void>;
 }
 
 const WantedContext = createContext<WantedContextValue | null>(null);
@@ -111,7 +108,6 @@ const DISABLED_VALUE: WantedContextValue = {
   watch: async () => undefined,
   unwatch: async () => undefined,
   approveRequestToWanted: async () => undefined,
-  refresh: async () => undefined,
 };
 
 /** Wanted list state; outside a provider every feature reads as switched off. */
@@ -165,7 +161,7 @@ export function WantedProvider({
       const [nextItems, nextWatches] = status.enabled
         ? await Promise.all([listWanted(), listWantedWatches()])
         : [[], []];
-      // A later refresh has started; its answer is the newer one.
+      // A newer refresh is in flight.
       if (request !== latestRequest.current) {
         return;
       }
@@ -184,7 +180,6 @@ export function WantedProvider({
     }
   }, [active]);
 
-  // The wanted list lives on the server; load it whenever the viewer can see it.
   useDependencyEffect(() => {
     void refresh();
   }, [refresh, settingsVersion]);
@@ -231,20 +226,17 @@ export function WantedProvider({
 
   const toggle = useCallback(
     async (book: Book, languages?: string[] | null) => {
-      if (!book.provider || !book.provider_id) {
+      const payload = buildWantedBookPayload(book);
+      if (!payload) {
         return;
       }
-      const key = wantedKey(book.provider, book.provider_id);
+      const key = wantedKey(payload.provider, payload.provider_id);
       const current = stateFor(book);
       if (current?.subscribed) {
         await run(async () => {
           await removeWanted(current.id);
           setOverrides((prev) => new Map(prev).set(key, null));
         }, `Removed "${book.title}" from your wanted list`);
-        return;
-      }
-      const payload = buildWantedBookPayload(book);
-      if (!payload) {
         return;
       }
       await run(async () => {
@@ -287,14 +279,14 @@ export function WantedProvider({
         ),
       setLanguages: (item, languages) =>
         run(() => setWantedLanguages(item.id, languages), `Languages saved for "${item.title}"`),
-      clearObtained: () => run(() => clearObtainedWanted(), 'Removed obtained books'),
+      clearObtained: () => run(clearObtainedWanted, 'Removed obtained books'),
       loadAttempts: (item) => getWantedAttempts(item.id),
       unblockRelease: (item, attempt) =>
         run(
           () => unblockWantedRelease(item.id, attempt.id),
           `"${attempt.release_title ?? 'Release'}" may be tried again`,
         ),
-      evaluateReleases: (wantedId, releases) => evaluateWantedReleases(wantedId, releases),
+      evaluateReleases: evaluateWantedReleases,
       grab: async (wantedId, release, title) => {
         let queued = false;
         await run(async () => {
@@ -306,28 +298,24 @@ export function WantedProvider({
       bookmarkAll: (target, userId) =>
         run(async () => {
           const result = await bookmarkAllForWanted(target, userId);
-          const skipped = [
+          const message = [
+            `Bookmarked ${result.bookmarked} book(s) of ${target.label}`,
             result.already > 0 ? `${result.already} already bookmarked` : null,
             result.in_library > 0 ? `${result.in_library} already in the library` : null,
           ]
             .filter(Boolean)
-            .map((part) => `; ${part}`)
-            .join('');
-          onShowToast(
-            `Bookmarked ${result.bookmarked} book(s) of ${target.label}${skipped}`,
-            'success',
-          );
+            .join('; ');
+          onShowToast(message, 'success');
         }),
       watch: (target, userId) =>
         run(
-          () => watchForWanted(target, userId).then(() => undefined),
+          () => watchForWanted(target, userId),
           `Watching ${target.label}: new books will be bookmarked`,
         ),
       unwatch: (entry) =>
         run(() => unwatchForWanted(entry.id), `No longer watching ${entry.label}`),
       approveRequestToWanted: (requestId, title) =>
         run(() => requestToWanted(requestId), `"${title}" is on the wanted list for the requester`),
-      refresh,
     }),
     [
       enabled,
@@ -342,7 +330,6 @@ export function WantedProvider({
       stateFor,
       toggle,
       run,
-      refresh,
       onShowToast,
     ],
   );

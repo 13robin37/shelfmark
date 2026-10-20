@@ -9,20 +9,16 @@ import type {
   WantedWatchTarget,
 } from '../types';
 
-/** Providers whose ids are not metadata books (manual search, source-backed browse). */
-const NON_METADATA_PROVIDERS = new Set(['manual']);
-
 export const wantedKey = (provider: string, providerId: string): string =>
   `${provider}:${providerId}`;
 
-/** Whether a search result can be bookmarked for automatic download. */
 export const isBookmarkable = (book: Book, contentType: ContentType): boolean =>
   contentType === 'ebook' &&
   Boolean(book.provider && book.provider_id) &&
-  !NON_METADATA_PROVIDERS.has(book.provider ?? '') &&
+  book.provider !== 'manual' &&
   !book.source;
 
-/** The book data the wanted list stores; null when the book cannot be bookmarked. */
+/** Null when the book has no metadata provider id. */
 export const buildWantedBookPayload = (book: Book): WantedBookPayload | null => {
   if (!book.provider || !book.provider_id) {
     return null;
@@ -57,10 +53,9 @@ export interface OwnWantedItems {
 }
 
 /**
- * The viewer's bookmark state for a book: local toggles first, then the viewer's own
- * wanted items - found by the book's key or, for a book that joined an item of another
- * provider (by ISBN), by the item id the server reported for it. What the search results
- * reported only counts as such until the list has loaded; after that it may be stale.
+ * Local toggles win, then the viewer's own items - by book key, or by item id for a book
+ * that joined another provider's item (by ISBN). The search result's own flag only counts
+ * until the list has loaded; after that it may be stale.
  */
 export const resolveWantedState = (
   book: Book,
@@ -126,7 +121,6 @@ export const formatRelativeTime = (iso: string | null, now: number = Date.now())
   return diff > 0 ? `in ${amount}` : `${amount} ago`;
 };
 
-/** One line describing where a wanted item stands. */
 export const describeWantedItem = (item: WantedItem, now: number = Date.now()): string => {
   if (item.state === 'obtained') {
     return item.obtained_reason === 'in_library' ? 'Already in your library' : 'Downloaded';
@@ -235,7 +229,7 @@ export const WANTED_ATTEMPT_LABELS: Record<WantedAttempt['status'], string> = {
   rejected: 'Cancelled by a user',
 };
 
-/** "blocked until 12 Nov" or "blocked" for a rejected release; null when not blocked. */
+/** "Blocked until 12 Nov", or "Blocked" without an end date; null when not blocked. */
 export const describeAttemptBlock = (attempt: WantedAttempt): string | null => {
   if (!attempt.blocked) {
     return null;
@@ -247,7 +241,6 @@ export const describeAttemptBlock = (attempt: WantedAttempt): string | null => {
   return `Blocked until ${until.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
 };
 
-/** Whether a watch follows the same series, author or list as ``target``. */
 export const isWatchedTarget = (watch: WantedWatchTarget, target: WantedWatchTarget): boolean => {
   const keys = Object.keys(target.fields);
   return (
