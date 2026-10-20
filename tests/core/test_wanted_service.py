@@ -68,17 +68,6 @@ def test_a_second_user_joins_the_same_item(service, users):
     assert len(service.list_subscribers(first["id"])) == 2
 
 
-def test_the_same_book_from_another_provider_joins_by_isbn(service, users):
-    first, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    other, created = service.add(
-        user_id=users[1]["id"],
-        book_data=_book(provider="openlibrary", provider_id="OL1W", isbn_13="9780441172719"),
-    )
-
-    assert created is False
-    assert other["id"] == first["id"]
-
-
 def test_removing_the_last_subscriber_deletes_the_item(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     service.add(user_id=users[1]["id"], book_data=_book())
@@ -179,7 +168,7 @@ def test_isbn_10_and_isbn_13_records_join(service, users):
 
 def test_joining_fills_gaps_in_the_stored_book(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    joined, _ = service.add(
+    joined, created = service.add(
         user_id=users[1]["id"],
         book_data=_book(
             provider="openlibrary",
@@ -190,6 +179,7 @@ def test_joining_fills_gaps_in_the_stored_book(service, users):
         ),
     )
 
+    assert created is False
     assert joined["id"] == item["id"]
     assert joined["book_data"]["title"] == "Dune"
     assert joined["book_data"]["search_title"] == "Dune"
@@ -253,12 +243,15 @@ def test_a_release_is_blocked_after_failing_in_two_cycles(service, users):
     assert key not in service.excluded_release_keys(item["id"], 3)
 
 
-def test_reset_interrupted_returns_items_to_waiting(service, users):
+def test_a_restart_resets_interrupted_items_and_wakes_resting_ones(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     service.update_item(item["id"], state=STATE_DOWNLOADING, current_task_id="md5a")
     _attempt(service, item["id"], cycle=1)
+    resting, _ = service.add(user_id=users[0]["id"], book_data=_book(provider_id="2", isbn_13=None))
+    service.update_item(resting["id"], next_search_at=None)
 
     assert service.reset_interrupted() == 1
+    assert service.get_item(resting["id"])["next_search_at"] is not None
     reset = service.get_item(item["id"])
     assert reset["state"] == STATE_WAITING
     assert reset["current_task_id"] is None
@@ -274,50 +267,19 @@ def test_mark_delivered(service, users):
     assert service.list_subscribers(item["id"])[0]["delivered_at"] is not None
 
 
-def test_a_rejected_release_is_skipped_until_the_blocklist_is_cleared(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    _attempt(service, item["id"], cycle=1)
-    service.finish_attempt(item["id"], "md5a", "rejected", "Cancelled")
-
-    assert "id:direct_download:md5a" in service.excluded_release_keys(item["id"], 7)
-    assert service.clear_blocklist(item["id"]) == 1
-    assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 7)
-
-
-def test_a_restart_wakes_resting_items(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    service.update_item(item["id"], next_search_at=None)
-
-    service.reset_interrupted()
-
-    assert service.get_item(item["id"])["next_search_at"] is not None
-
-
-def test_a_new_subscriber_wakes_a_resting_item(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    service.update_item(item["id"], next_search_at=None)
-
-    rejoined, _ = service.add(user_id=users[1]["id"], book_data=_book())
-
-    assert rejoined["next_search_at"] is not None
-
-
-def test_orphaned_items_are_not_searched_and_get_pruned(service, users, db_path):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    UserDB(db_path).delete_user(users[0]["id"])
-
-    assert service.due_items("2999-01-01T00:00:00+00:00", 10) == []
-    assert service.prune_orphans() == 1
-    assert service.get_item(item["id"]) is None
-
-
-def test_deleting_a_user_drops_their_subscription(service, users, db_path):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+def test_deleting_a_user_drops_their_subscriptions_and_orphans_get_pruned(service, users, db_path):
+    shared, _ = service.add(user_id=users[0]["id"], book_data=_book())
     service.add(user_id=users[1]["id"], book_data=_book())
+    orphan, _ = service.add(user_id=users[0]["id"], book_data=_book(provider_id="2", isbn_13=None))
 
     UserDB(db_path).delete_user(users[0]["id"])
 
-    assert [sub["user_id"] for sub in service.list_subscribers(item["id"])] == [users[1]["id"]]
+    assert [sub["user_id"] for sub in service.list_subscribers(shared["id"])] == [users[1]["id"]]
+    due = service.due_items("2999-01-01T00:00:00+00:00", 10)
+    assert [entry["id"] for entry in due] == [shared["id"]]
+    assert service.prune_orphans() == 1
+    assert service.get_item(orphan["id"]) is None
+    assert service.get_item(shared["id"]) is not None
 
 
 def test_blocks_expire_so_an_outage_does_not_block_a_release_forever(service, users, db_path):
@@ -334,7 +296,7 @@ def test_blocks_expire_so_an_outage_does_not_block_a_release_forever(service, us
     assert "id:direct_download:md5a" not in service.excluded_release_keys(item["id"], 3)
 
 
-def test_attempts_say_how_long_their_release_is_blocked(service, users):
+def test_blocked_releases_show_their_block_and_can_be_allowed_again(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     for cycle in (1, 2):
         _attempt(service, item["id"], cycle=cycle)
@@ -348,25 +310,24 @@ def test_attempts_say_how_long_their_release_is_blocked(service, users):
     assert attempts["md5b"]["blocked"] is True
     assert attempts["md5b"]["blocked_until"] is None
 
-
-def test_one_release_can_be_allowed_again(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
-    for cycle in (1, 2):
-        _attempt(service, item["id"], cycle=cycle)
-        service.finish_attempt(item["id"], "md5a", ATTEMPT_ERROR, "boom")
-    _attempt(service, item["id"], cycle=3, source_id="md5b", match_key="other")
-    service.finish_attempt(item["id"], "md5b", "rejected", "Cancelled")
+    # Allowing one release again keeps the other blocked.
     attempt_id = service.list_attempts(item["id"])[-1]["id"]
-
     assert service.unblock_release(item["id"], attempt_id) == 2
     excluded = service.excluded_release_keys(item["id"], 9)
     assert "id:direct_download:md5a" not in excluded
     assert "id:direct_download:md5b" in excluded
 
+    # Clearing the blocklist frees a release rejected by a cancel too.
+    assert service.clear_blocklist(item["id"]) == 1
+    assert "id:direct_download:md5b" not in service.excluded_release_keys(item["id"], 9)
 
-def test_changing_languages_searches_again(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book())
+
+def test_changing_languages_searches_again_but_saving_the_same_does_not(service, users):
+    item, _ = service.add(user_id=users[0]["id"], book_data=_book(), languages=["de"])
     service.update_item(item["id"], next_search_at="2999-01-01T00:00:00+00:00", backoff_level=2)
+
+    assert service.set_languages(item["id"], users[0]["id"], ["de"]) is True
+    assert service.get_item(item["id"])["backoff_level"] == 2
 
     assert service.set_languages(item["id"], users[0]["id"], ["en"]) is True
     assert service.set_languages(item["id"], users[1]["id"], ["en"]) is False
@@ -397,15 +358,6 @@ def test_clearing_obtained_books(service, users):
     service.clear_obtained(None, everyone=True)
     assert service.get_item(shared["id"]) is None
     assert service.get_item(waiting["id"]) is not None
-
-
-def test_saving_the_same_languages_does_not_search_again(service, users):
-    item, _ = service.add(user_id=users[0]["id"], book_data=_book(), languages=["en"])
-    service.update_item(item["id"], next_search_at="2999-01-01T00:00:00+00:00", backoff_level=2)
-
-    service.set_languages(item["id"], users[0]["id"], ["en"])
-
-    assert service.get_item(item["id"])["backoff_level"] == 2
 
 
 def test_language_lists_are_bounded(service, users):
@@ -462,11 +414,14 @@ def test_the_watch_synced_longest_ago_is_due(service, users):
     assert service.get_watch(first["id"]) is None
 
 
-def test_an_approval_wakes_a_resting_bookmark(service, users):
+def test_a_new_subscriber_or_an_approval_wakes_a_resting_item(service, users):
     item, _ = service.add(user_id=users[0]["id"], book_data=_book())
     service.update_item(item["id"], next_search_at=None)
 
-    service.add(user_id=users[0]["id"], book_data=_book(), approved_by=users[1]["id"])
+    rejoined, _ = service.add(user_id=users[1]["id"], book_data=_book())
+    assert rejoined["next_search_at"] is not None
 
+    service.update_item(item["id"], next_search_at=None)
+    service.add(user_id=users[0]["id"], book_data=_book(), approved_by=users[2]["id"])
     assert service.get_item(item["id"])["next_search_at"] is not None
-    assert service.list_subscribers(item["id"])[0]["approved_by"] == users[1]["id"]
+    assert service.list_subscribers(item["id"])[0]["approved_by"] == users[2]["id"]
