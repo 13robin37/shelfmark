@@ -152,24 +152,40 @@ def test_render_message_uses_request_approved_copy():
 
 
 @pytest.mark.parametrize(
-    ("detail", "expected"),
+    ("event", "detail", "expected"),
     [
-        (None, 'Bookmarked "Dune" by Frank Herbert was downloaded.'),
         (
+            "WANTED_OBTAINED",
+            None,
+            ("Wanted Book Available", 'Bookmarked "Dune" by Frank Herbert was downloaded.'),
+        ),
+        (
+            "WANTED_OBTAINED",
             "is already in your library",
-            'Bookmarked "Dune" by Frank Herbert is already in your library.',
+            (
+                "Wanted Book Available",
+                'Bookmarked "Dune" by Frank Herbert is already in your library.',
+            ),
+        ),
+        (
+            "WANTED_GRABBED",
+            "Prowlarr",
+            (
+                "Wanted Book Found",
+                'Bookmarked "Dune" by Frank Herbert found on Prowlarr, downloading.',
+            ),
         ),
     ],
 )
-def test_render_message_for_obtained_wanted_book(detail, expected):
+def test_render_message_for_wanted_book(event, detail, expected):
     context = notifications_module.NotificationContext(
-        event=notifications_module.NotificationEvent.WANTED_OBTAINED,
+        event=notifications_module.NotificationEvent[event],
         title="Dune",
         author="Frank Herbert",
         detail=detail,
     )
 
-    assert notifications_module._render_message(context) == ("Wanted Book Available", expected)
+    assert notifications_module._render_message(context) == expected
 
 
 def test_notify_admin_submits_non_blocking_when_route_matches_event(monkeypatch):
@@ -689,17 +705,3 @@ class TestAppriseProxyEnv:
         result = notifications_module._apprise_proxy_env()
 
         assert "HTTP_PROXY" not in result
-
-
-def test_render_message_for_found_wanted_book():
-    context = notifications_module.NotificationContext(
-        event=notifications_module.NotificationEvent.WANTED_GRABBED,
-        title="Dune",
-        author="Frank Herbert",
-        detail="Prowlarr",
-    )
-
-    assert notifications_module._render_message(context) == (
-        "Wanted Book Found",
-        'Bookmarked "Dune" by Frank Herbert found on Prowlarr, downloading.',
-    )
