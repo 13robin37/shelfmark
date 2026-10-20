@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from shelfmark.core.config import config
@@ -124,7 +125,9 @@ def feed_interval_minutes() -> float:
         parsed = float(str(value))
     except ValueError:
         return float(DEFAULT_FEED_INTERVAL_MINUTES)
-    return max(parsed, 0.0) if parsed == parsed else float(DEFAULT_FEED_INTERVAL_MINUTES)
+    if math.isnan(parsed):
+        return float(DEFAULT_FEED_INTERVAL_MINUTES)
+    return max(parsed, 0.0)
 
 
 def max_searches_per_hour() -> int:

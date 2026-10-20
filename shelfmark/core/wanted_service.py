@@ -19,9 +19,6 @@ STATE_SEARCHING = "searching"
 STATE_DOWNLOADING = "downloading"
 STATE_OBTAINED = "obtained"
 STATE_PAUSED = "paused"
-WANTED_STATES = frozenset(
-    {STATE_WAITING, STATE_SEARCHING, STATE_DOWNLOADING, STATE_OBTAINED, STATE_PAUSED}
-)
 
 ATTEMPT_QUEUED = "queued"
 ATTEMPT_COMPLETE = "complete"
@@ -186,9 +183,7 @@ class WantedService:
         return conn
 
     @staticmethod
-    def _row_to_item(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
+    def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["book_data"] = _load_json(item.get("book_data")) or {}
         item["searched_sources"] = _load_json(item.get("searched_sources")) or {}
@@ -202,24 +197,31 @@ class WantedService:
 
     def _get_item(self, conn: sqlite3.Connection, wanted_id: int) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM wanted_items WHERE id = ?", (wanted_id,)).fetchone()
-        return self._row_to_item(row)
+        return self._row_to_item(row) if row is not None else None
 
     def _find_existing(
         self, conn: sqlite3.Connection, book: dict[str, Any]
     ) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT * FROM wanted_items WHERE provider = ? AND provider_id = ?",
-            (book["provider"], str(book["provider_id"])),
+            (book["provider"], book["provider_id"]),
         ).fetchone()
-        if row is not None:
-            return self._row_to_item(row)
-        isbn = book.get("isbn_13")
-        if not isbn:
-            return None
-        row = conn.execute(
-            "SELECT * FROM wanted_items WHERE isbn_13 = ? ORDER BY id LIMIT 1", (isbn,)
+        if row is None and book.get("isbn_13"):
+            row = conn.execute(
+                "SELECT * FROM wanted_items WHERE isbn_13 = ? ORDER BY id LIMIT 1",
+                (book["isbn_13"],),
+            ).fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    @staticmethod
+    def _find_subscriber(
+        conn: sqlite3.Connection, wanted_id: int, user_id: int | None
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT id, languages FROM wanted_subscribers "
+            "WHERE wanted_id = ? AND IFNULL(user_id, 0) = IFNULL(?, 0)",
+            (wanted_id, user_id),
         ).fetchone()
-        return self._row_to_item(row)
 
     def add(
         self,
@@ -254,7 +256,7 @@ class WantedService:
                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             book["provider"],
-                            str(book["provider_id"]),
+                            book["provider_id"],
                             book.get("isbn_13"),
                             book.get("isbn_10"),
                             book["title"],
@@ -284,11 +286,7 @@ class WantedService:
                             ),
                         )
 
-                subscriber = conn.execute(
-                    "SELECT id FROM wanted_subscribers "
-                    "WHERE wanted_id = ? AND IFNULL(user_id, 0) = IFNULL(?, 0)",
-                    (wanted_id, user_id),
-                ).fetchone()
+                subscriber = self._find_subscriber(conn, wanted_id, user_id)
                 if subscriber is None:
                     conn.execute(
                         "INSERT INTO wanted_subscribers "
@@ -302,34 +300,30 @@ class WantedService:
                             now,
                         ),
                     )
-                    if existing is not None and existing["state"] == STATE_OBTAINED:
-                        # Someone new wants it, so it is wanted again until they have it.
-                        conn.execute(
-                            "UPDATE wanted_items SET state = ?, next_search_at = ?, "
-                            "backoff_level = 0, last_result = NULL, obtained_at = NULL, "
-                            "obtained_reason = NULL, updated_at = ? WHERE id = ?",
-                            (STATE_WAITING, now, now, wanted_id),
-                        )
-                    elif existing is not None:
-                        # A resting item (nobody could download it) may be searchable now.
-                        conn.execute(
-                            "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
-                            "WHERE id = ? AND state = ? AND next_search_at IS NULL",
-                            (now, now, wanted_id, STATE_WAITING),
-                        )
                 else:
                     if normalized_languages is not None:
-                        self._set_languages(conn, wanted_id, subscriber["id"], normalized_languages)
+                        self._set_languages(conn, wanted_id, subscriber, normalized_languages)
                     if approved_by is not None:
                         conn.execute(
                             "UPDATE wanted_subscribers SET approved_by = ? WHERE id = ?",
                             (approved_by, subscriber["id"]),
                         )
-                        conn.execute(
-                            "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
-                            "WHERE id = ? AND state = ? AND next_search_at IS NULL",
-                            (now, now, wanted_id, STATE_WAITING),
-                        )
+
+                if subscriber is None and existing and existing["state"] == STATE_OBTAINED:
+                    # Someone new wants it, so it is wanted again until they have it.
+                    conn.execute(
+                        "UPDATE wanted_items SET state = ?, next_search_at = ?, "
+                        "backoff_level = 0, last_result = NULL, obtained_at = NULL, "
+                        "obtained_reason = NULL, updated_at = ? WHERE id = ?",
+                        (STATE_WAITING, now, now, wanted_id),
+                    )
+                elif subscriber is None or approved_by is not None:
+                    # A resting item (nobody could download it) may be searchable now.
+                    conn.execute(
+                        "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
+                        "WHERE id = ? AND state = ? AND next_search_at IS NULL",
+                        (now, now, wanted_id, STATE_WAITING),
+                    )
                 conn.commit()
                 item = self._get_item(conn, wanted_id)
             finally:
@@ -418,7 +412,7 @@ class WantedService:
                        ORDER BY i.created_at DESC, i.id DESC""",
                     (user_id,),
                 )
-            items = [item for row in rows.fetchall() if (item := self._row_to_item(row))]
+            items = [self._row_to_item(row) for row in rows.fetchall()]
             if not items:
                 return []
             ids = [item["id"] for item in items]
@@ -519,7 +513,7 @@ class WantedService:
             rows = conn.execute(
                 "SELECT * FROM wanted_items WHERE state = ? ORDER BY id", (state,)
             ).fetchall()
-            return [item for row in rows if (item := self._row_to_item(row))]
+            return [self._row_to_item(row) for row in rows]
         finally:
             conn.close()
 
@@ -535,7 +529,7 @@ class WantedService:
                    ORDER BY next_search_at, id LIMIT ?""",
                 (STATE_WAITING, now, limit),
             ).fetchall()
-            return [item for row in rows if (item := self._row_to_item(row))]
+            return [self._row_to_item(row) for row in rows]
         finally:
             conn.close()
 
@@ -551,13 +545,12 @@ class WantedService:
         if unknown:
             msg = f"Unknown wanted item fields: {sorted(unknown)}"
             raise ValueError(msg)
-        values = dict(fields)
         for key in ("book_data", "searched_sources"):
-            if key in values and values[key] is not None and not isinstance(values[key], str):
-                values[key] = json.dumps(values[key])
-        values["updated_at"] = now_utc_iso()
-        assignments = ", ".join(f"{column} = ?" for column in values)
-        params: list[Any] = [*values.values(), wanted_id]
+            if fields.get(key) is not None:
+                fields[key] = json.dumps(fields[key])
+        fields["updated_at"] = now_utc_iso()
+        assignments = ", ".join(f"{column} = ?" for column in fields)
+        params: list[Any] = [*fields.values(), wanted_id]
         where = "id = ?"
         if expected_state is not None:
             where += " AND state = ?"
@@ -608,8 +601,7 @@ class WantedService:
                     "next_search_at = ?, updated_at = ? WHERE state IN (?, ?)",
                     (STATE_WAITING, now, now, STATE_SEARCHING, STATE_DOWNLOADING),
                 )
-                # Settings may have changed while the server was down; check resting
-                # items again (a check that finds nothing allowed costs no search).
+                # Settings may have changed while down; checking a resting item is cheap.
                 conn.execute(
                     "UPDATE wanted_items SET next_search_at = ?, updated_at = ? "
                     "WHERE state = ? AND next_search_at IS NULL",
@@ -695,7 +687,7 @@ class WantedService:
         expiry = (datetime.now(UTC) - timedelta(days=BLOCK_EXPIRY_DAYS)).isoformat(
             timespec="seconds"
         )
-        # Per key, when each cycle that failed the release last failed it.
+        # Per key: failed cycle -> when it last failed.
         failures: dict[str, dict[int, str]] = {}
         blocked: dict[str, str | None] = {}
         for row in rows:
@@ -704,9 +696,10 @@ class WantedService:
                 blocked.update(dict.fromkeys(keys))
             finished = row["finished_at"] or ""
             if row["status"] == ATTEMPT_ERROR and finished >= expiry:
+                cycle = int(row["cycle"])
                 for key in keys:
                     cycles = failures.setdefault(key, {})
-                    cycles[int(row["cycle"])] = max(cycles.get(int(row["cycle"]), ""), finished)
+                    cycles[cycle] = max(cycles.get(cycle, ""), finished)
         for key, cycles in failures.items():
             if len(cycles) < BLOCK_AFTER_FAILED_CYCLES or key in blocked:
                 continue
@@ -735,16 +728,15 @@ class WantedService:
         blocked = self._blocked_keys(rows)
         attempts: list[dict[str, Any]] = []
         for row in rows[:limit]:
-            keys = release_attempt_keys(row["source"], row["source_id"], row["match_key"]) & set(
-                blocked
+            keys = blocked.keys() & release_attempt_keys(
+                row["source"], row["source_id"], row["match_key"]
             )
-            attempt = dict(row)
-            attempt["blocked"] = bool(keys)
             ends = [blocked[key] for key in keys]
-            expiring = [end for end in ends if end is not None]
+            attempt = dict(row)
+            attempt["blocked"] = bool(ends)
             # A rejection (no end) outlasts any expiring block.
             attempt["blocked_until"] = (
-                max(expiring) if expiring and len(expiring) == len(ends) else None
+                None if None in ends else max(filter(None, ends), default=None)
             )
             attempts.append(attempt)
         return attempts
@@ -779,17 +771,17 @@ class WantedService:
 
     @staticmethod
     def _set_languages(
-        conn: sqlite3.Connection, wanted_id: int, subscriber_id: int, languages: list[str] | None
+        conn: sqlite3.Connection,
+        wanted_id: int,
+        subscriber: sqlite3.Row,
+        languages: list[str] | None,
     ) -> None:
-        now = now_utc_iso()
         stored = json.dumps(languages) if languages else None
-        current = conn.execute(
-            "SELECT languages FROM wanted_subscribers WHERE id = ?", (subscriber_id,)
-        ).fetchone()
-        if current is not None and current["languages"] == stored:
+        if subscriber["languages"] == stored:
             return
+        now = now_utc_iso()
         conn.execute(
-            "UPDATE wanted_subscribers SET languages = ? WHERE id = ?", (stored, subscriber_id)
+            "UPDATE wanted_subscribers SET languages = ? WHERE id = ?", (stored, subscriber["id"])
         )
         # Other languages may find what the last searches did not.
         conn.execute(
@@ -804,14 +796,10 @@ class WantedService:
         with self._lock:
             conn = self._connect()
             try:
-                subscriber = conn.execute(
-                    "SELECT id FROM wanted_subscribers "
-                    "WHERE wanted_id = ? AND IFNULL(user_id, 0) = IFNULL(?, 0)",
-                    (wanted_id, user_id),
-                ).fetchone()
+                subscriber = self._find_subscriber(conn, wanted_id, user_id)
                 if subscriber is None:
                     return False
-                self._set_languages(conn, wanted_id, subscriber["id"], normalized)
+                self._set_languages(conn, wanted_id, subscriber, normalized)
                 conn.commit()
                 return True
             finally:

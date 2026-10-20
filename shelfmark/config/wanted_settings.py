@@ -18,13 +18,7 @@ from shelfmark.core.wanted_config import (
     default_source_order,
 )
 
-_SOURCE_LABELS = {
-    "direct_download": "Anna's Archive / Direct Download",
-    "libgen": "Libgen",
-    "prowlarr": "Prowlarr",
-    "newznab": "Newznab",
-    "irc": "IRC",
-}
+_SOURCE_LABELS = {"direct_download": "Anna's Archive / Direct Download"}
 
 
 def _source_options() -> list[dict[str, object]]:
