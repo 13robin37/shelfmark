@@ -800,8 +800,7 @@ const ReleaseModalSession = ({
     wantedState?.subscribed && contentType === 'ebook' && wantedState.state !== 'obtained'
       ? wantedState.id
       : null;
-  // A download started here counts for the bookmark while it waits for a release.
-  const grabsForWanted = allowWantedGrab && wantedId !== null && wantedState?.state === 'waiting';
+  const grabForWantedId = allowWantedGrab && wantedState?.state === 'waiting' ? wantedId : null;
   const [wantedNotes, setWantedNotes] = useState<Record<string, string | null>>({});
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
@@ -869,7 +868,6 @@ const ReleaseModalSession = ({
     defaultLanguages,
   });
 
-  // For a bookmarked book, show which releases the wanted list itself would pass over.
   useDependencyEffect(() => {
     if (wantedId === null) {
       setWantedNotes({});
@@ -1307,8 +1305,8 @@ const ReleaseModalSession = ({
             }. If it contains several books, enable the multi-book pack toggle.`,
           );
         }
-        if (grabsForWanted && wantedId !== null && !multiBook) {
-          if (await grab(wantedId, release, book.title)) {
+        if (grabForWantedId !== null && !multiBook) {
+          if (await grab(grabForWantedId, release, book.title)) {
             handleClose();
           }
           return;
@@ -1333,8 +1331,7 @@ const ReleaseModalSession = ({
       contentType,
       handleClose,
       multiBook,
-      grabsForWanted,
-      wantedId,
+      grabForWantedId,
       grab,
     ],
   );

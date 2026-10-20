@@ -64,6 +64,7 @@ const AttemptRow = ({ item, attempt }: { item: WantedItem; attempt: WantedAttemp
     attempt.source_label ?? attempt.source,
     attempt.format?.toUpperCase(),
     attempt.size,
+    formatRelativeTime(attempt.created_at),
   ]
     .filter(Boolean)
     .join(' · ');
@@ -76,7 +77,6 @@ const AttemptRow = ({ item, attempt }: { item: WantedItem; attempt: WantedAttemp
       <p className="text-[11px] opacity-70">
         {WANTED_ATTEMPT_LABELS[attempt.status]}
         {details && ` · ${details}`}
-        {attempt.created_at && ` · ${formatRelativeTime(attempt.created_at) ?? ''}`}
       </p>
       {attempt.error_message && (
         <p className="text-[11px] break-words text-red-600/80 dark:text-red-400/80">
@@ -171,7 +171,6 @@ const WantedRow = ({ item }: { item: WantedItem }) => {
   const [showHistory, setShowHistory] = useState(false);
   const [editingLanguages, setEditingLanguages] = useState(false);
   const subscribers = item.subscribers ?? [];
-  // Without sign-in there are no usernames to show.
   const subscriberNames = subscribers
     .map((sub) => sub.username)
     .filter((name): name is string => Boolean(name));

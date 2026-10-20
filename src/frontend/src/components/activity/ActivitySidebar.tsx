@@ -70,6 +70,13 @@ type ActivityCategoryKey = 'needs_review' | 'in_progress' | 'complete' | 'failed
 type ActivityTabKey = 'all' | 'downloads' | 'requests' | 'wanted' | 'history';
 const ALL_USERS_FILTER = '__all_users__';
 
+const tabButtonClassName = (isActive: boolean): string =>
+  `border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+    isActive
+      ? 'text-sky-600 dark:text-sky-400'
+      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+  }`;
+
 const getCategoryLabel = (key: ActivityCategoryKey, isAdmin: boolean): string => {
   if (key === 'needs_review') {
     return isAdmin ? 'Needs Review' : 'Waiting';
@@ -766,11 +773,7 @@ export const ActivitySidebar = ({
                   tabRefs.current.all = el;
                 }}
                 onClick={() => handleTabChange('all')}
-                className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
-                  effectiveActiveTab === 'all'
-                    ? 'text-sky-600 dark:text-sky-400'
-                    : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                }`}
+                className={tabButtonClassName(effectiveActiveTab === 'all')}
                 aria-current={effectiveActiveTab === 'all' ? 'page' : undefined}
               >
                 All
@@ -781,11 +784,7 @@ export const ActivitySidebar = ({
                   tabRefs.current.downloads = el;
                 }}
                 onClick={() => handleTabChange('downloads')}
-                className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
-                  effectiveActiveTab === 'downloads'
-                    ? 'text-sky-600 dark:text-sky-400'
-                    : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                }`}
+                className={tabButtonClassName(effectiveActiveTab === 'downloads')}
                 aria-current={effectiveActiveTab === 'downloads' ? 'page' : undefined}
               >
                 Downloads
@@ -802,11 +801,7 @@ export const ActivitySidebar = ({
                     tabRefs.current.requests = el;
                   }}
                   onClick={() => handleTabChange('requests')}
-                  className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
-                    effectiveActiveTab === 'requests'
-                      ? 'text-sky-600 dark:text-sky-400'
-                      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                  }`}
+                  className={tabButtonClassName(effectiveActiveTab === 'requests')}
                   aria-current={effectiveActiveTab === 'requests' ? 'page' : undefined}
                 >
                   Requests
@@ -824,11 +819,7 @@ export const ActivitySidebar = ({
                     tabRefs.current.wanted = el;
                   }}
                   onClick={() => handleTabChange('wanted')}
-                  className={`border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
-                    effectiveActiveTab === 'wanted'
-                      ? 'text-sky-600 dark:text-sky-400'
-                      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                  }`}
+                  className={tabButtonClassName(effectiveActiveTab === 'wanted')}
                   aria-current={effectiveActiveTab === 'wanted' ? 'page' : undefined}
                 >
                   Wanted
