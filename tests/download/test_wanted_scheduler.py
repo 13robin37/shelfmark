@@ -26,6 +26,16 @@ SOURCES = [
     {"name": "direct_download", "enabled": True, "supported_content_types": ["ebook"]},
     {"name": "libgen", "enabled": True, "supported_content_types": ["ebook"]},
 ]
+DUE = "2000-01-01T00:00:00+00:00"
+LATER = "2999-01-01T00:00:00+00:00"
+DENY_ALL = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+NO_DIRECT_DOWNLOAD = {
+    "REQUESTS_ENABLED": True,
+    "REQUEST_POLICY_DEFAULT_EBOOK": "download",
+    "REQUEST_POLICY_RULES": [
+        {"source": "direct_download", "content_type": "ebook", "mode": "request_release"}
+    ],
+}
 
 
 def _release(source_id, *, source="direct_download", title="Dune", fmt="epub"):
@@ -48,6 +58,7 @@ class _Env:
             "direct_download": ([_release("aa-1"), _release("aa-2", fmt="mobi")], None),
             "libgen": ([_release("libgen:1", source="libgen")], None),
         }
+        self.search_kwargs: list[dict] = []
         self.in_library = False
         self.policy = {"REQUESTS_ENABLED": False}
         self.changed: list[int | None] = []
@@ -75,16 +86,18 @@ class _Env:
     def _lookup(self, task_id):
         if task_id in self.queue_statuses:
             return self.queue_statuses[task_id]
-        for payload, user_id, _username in self.queued:
+        for (payload, user_id, _username), kwargs in zip(
+            self.queued, self.queued_kwargs, strict=True
+        ):
             if payload["source_id"] == task_id:
-                kwargs = self.queued_kwargs[self.queued.index((payload, user_id, _username))]
                 return QueueStatus.DOWNLOADING, SimpleNamespace(
                     wanted_id=kwargs.get("wanted_id"), task_id=task_id, user_id=user_id
                 )
         return None, None
 
     def _search(self, source, book, **kwargs):
-        del book, kwargs
+        del book
+        self.search_kwargs.append(kwargs)
         releases, error = self.results.get(source, ([], None))
         return (None if error else object()), releases, error
 
@@ -95,21 +108,32 @@ class _Env:
     def item(self, wanted_id):
         return self.service.get_item(wanted_id)
 
-    def finish(self, wanted_id, status, message=None, **fields):
-        item = self.item(wanted_id)
+    def pending(self, wanted_id):
+        subscribers = self.service.list_subscribers(wanted_id)
+        return [sub["user_id"] for sub in subscribers if not sub["delivered_at"]]
+
+    def task(self, wanted_id, **fields):
+        """The queue task of the item's current download, as the queue reports it."""
         payload, user_id, _username = self.queued[-1]
         task = SimpleNamespace(
             wanted_id=wanted_id,
-            task_id=item["current_task_id"],
+            task_id=self.item(wanted_id)["current_task_id"],
             source=payload["source"],
             user_id=user_id,
-            status_message=message,
-            last_error_type="StatusCallbackError" if status == QueueStatus.ERROR else None,
+            status_message=None,
+            last_error_type=None,
             staged_path=None,
         )
         for key, value in fields.items():
             setattr(task, key, value)
-        self.scheduler.on_task_terminal(item["current_task_id"], status, task)
+        return task
+
+    def finish(self, wanted_id, status, message=None, **fields):
+        fields.setdefault(
+            "last_error_type", "StatusCallbackError" if status == QueueStatus.ERROR else None
+        )
+        task = self.task(wanted_id, status_message=message, **fields)
+        self.scheduler.on_task_terminal(task.task_id, status, task)
 
 
 @pytest.fixture
@@ -144,6 +168,24 @@ def env(tmp_path):
         active.stop()
 
 
+@pytest.fixture
+def notes():
+    """Records sent notifications as (event, user id or None for the admin, detail)."""
+    sent: list[tuple[str, int | None, str | None]] = []
+    with (
+        patch(
+            "shelfmark.core.notifications.notify_admin",
+            side_effect=lambda event, ctx: sent.append((event.value, None, ctx.detail)),
+        ),
+        patch(
+            "shelfmark.core.notifications.notify_user",
+            side_effect=lambda user_id, event, ctx: sent.append((event.value, user_id, ctx.detail)),
+        ),
+        patch("shelfmark.release_sources.get_source_display_name", return_value="Anna's Archive"),
+    ):
+        yield sent
+
+
 def test_a_cycle_queues_the_best_release_for_the_first_subscriber(env):
     wanted_id = env.add()
 
@@ -159,13 +201,17 @@ def test_a_cycle_queues_the_best_release_for_the_first_subscriber(env):
     assert item["current_task_id"] == "aa-1"
     assert item["search_count"] == 1
     assert item["searched_sources"] == {"answered": ["direct_download", "libgen"], "failed": []}
+    # All languages are asked for explicitly, and listeners hear of the change.
+    assert env.search_kwargs and all(kw["languages"] == ["all"] for kw in env.search_kwargs)
+    assert wanted_id in env.changed
 
 
-def test_a_failed_attempt_moves_on_to_the_next_release(env):
+@pytest.mark.parametrize("message", ["Server error", "No supported file formats found"])
+def test_a_failed_attempt_is_a_strike_and_moves_on_to_the_next_release(env, message):
     wanted_id = env.add()
     env.scheduler.tick()
 
-    env.finish(wanted_id, QueueStatus.ERROR, "Server error")
+    env.finish(wanted_id, QueueStatus.ERROR, message)
     assert env.item(wanted_id)["state"] == STATE_SEARCHING
     env.scheduler.tick()
 
@@ -194,28 +240,34 @@ def test_a_release_failing_in_two_cycles_is_not_tried_a_third_time(env):
     env.results = {"direct_download": ([_release("aa-1")], None)}
     wanted_id = env.add()
     for _ in range(2):
-        env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
+        env.service.update_item(wanted_id, next_search_at=DUE)
         env.scheduler.tick()
         env.finish(wanted_id, QueueStatus.ERROR)
         env.scheduler.tick()
-    env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
+    env.service.update_item(wanted_id, next_search_at=DUE)
     env.scheduler.tick()
 
     assert len(env.queued) == 2
     assert env.item(wanted_id)["last_result"].endswith("no matching release")
 
 
-def test_completion_marks_the_item_obtained_and_delivered(env):
+def test_completion_marks_the_item_obtained_delivered_and_notifies(env, notes):
     wanted_id = env.add()
     env.add(user=env.bob)
     env.scheduler.tick()
+    notes.clear()
 
     env.finish(wanted_id, QueueStatus.COMPLETE)
 
     item = env.item(wanted_id)
     assert item["state"] == STATE_OBTAINED
     assert item["obtained_reason"] == "downloaded"
-    assert all(sub["delivered_at"] for sub in env.service.list_subscribers(wanted_id))
+    assert env.pending(wanted_id) == []
+    assert sorted((user_id or 0, detail) for _event, user_id, detail in notes) == [
+        (0, "was downloaded"),
+        (env.alice["id"], "was downloaded"),
+        (env.bob["id"], "was downloaded"),
+    ]
 
 
 def test_a_cancel_rejects_the_release_and_moves_on(env):
@@ -236,7 +288,7 @@ def test_a_cancel_rejects_the_release_and_moves_on(env):
     assert env.queued[-1][0]["source_id"] == "aa-2"
 
 
-def test_a_book_already_in_the_library_is_not_downloaded(env):
+def test_a_book_already_in_the_library_is_not_downloaded(env, notes):
     env.in_library = True
     wanted_id = env.add()
 
@@ -246,6 +298,7 @@ def test_a_book_already_in_the_library_is_not_downloaded(env):
     item = env.item(wanted_id)
     assert item["state"] == STATE_OBTAINED
     assert item["obtained_reason"] == "in_library"
+    assert [detail for _e, user_id, detail in notes if user_id] == ["is already in your library"]
 
 
 def test_nothing_found_waits_and_source_errors_retry_sooner(env):
@@ -261,7 +314,7 @@ def test_nothing_found_waits_and_source_errors_retry_sooner(env):
     assert "libgen failed" in item["last_result"]
 
     # Failing again is an outage, not a blip: the usual backoff applies.
-    env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
+    env.service.update_item(wanted_id, next_search_at=DUE)
     env.scheduler.tick()
     assert env.item(wanted_id)["backoff_level"] == 1
 
@@ -283,7 +336,7 @@ def test_a_source_change_makes_waiting_items_due(env):
     env.results = {}
     wanted_id = env.add()
     env.scheduler.tick()
-    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00", backoff_level=2)
+    env.service.update_item(wanted_id, next_search_at=LATER, backoff_level=2)
 
     with patch("shelfmark.core.settings_registry.load_config_file", return_value={"changed": True}):
         env.scheduler.tick()
@@ -295,13 +348,7 @@ def test_a_source_change_makes_waiting_items_due(env):
 
 
 def test_releases_from_sources_a_subscriber_may_not_use_are_skipped(env):
-    env.policy = {
-        "REQUESTS_ENABLED": True,
-        "REQUEST_POLICY_DEFAULT_EBOOK": "download",
-        "REQUEST_POLICY_RULES": [
-            {"source": "direct_download", "content_type": "ebook", "mode": "request_release"}
-        ],
-    }
+    env.policy = NO_DIRECT_DOWNLOAD
     env.add()
 
     env.scheduler.tick()
@@ -309,9 +356,20 @@ def test_releases_from_sources_a_subscriber_may_not_use_are_skipped(env):
     assert [payload["source"] for payload, _, _ in env.queued] == ["libgen"]
 
 
-def test_a_release_that_cannot_be_queued_is_skipped_without_a_strike(env):
-    env.queue_result = (False, "Source unavailable")
-    env.queue_statuses = dict.fromkeys(("aa-1", "aa-2", "libgen:1"), (None, None))
+@pytest.mark.parametrize(
+    ("error", "aa_1_in_queue"),
+    [
+        ("Source unavailable", (None, None)),
+        # Queued by someone else: not taken over as this item's download.
+        (
+            "Release is already in the download queue",
+            (QueueStatus.DOWNLOADING, SimpleNamespace(wanted_id=None)),
+        ),
+    ],
+)
+def test_a_release_that_cannot_be_queued_is_skipped_without_a_strike(env, error, aa_1_in_queue):
+    env.queue_result = (False, error)
+    env.queue_statuses = {"aa-1": aa_1_in_queue, "aa-2": (None, None), "libgen:1": (None, None)}
     wanted_id = env.add()
 
     env.scheduler.tick()
@@ -319,7 +377,7 @@ def test_a_release_that_cannot_be_queued_is_skipped_without_a_strike(env):
     assert len(env.queued) == 3
     assert {attempt["status"] for attempt in env.service.list_attempts(wanted_id)} == {"cancelled"}
     assert env.item(wanted_id)["state"] == STATE_WAITING
-    assert env.item(wanted_id)["last_result"].endswith("could not queue: Source unavailable")
+    assert env.item(wanted_id)["last_result"].endswith(f"could not queue: {error}")
 
 
 def test_an_old_candidate_list_is_searched_afresh(env):
@@ -345,13 +403,6 @@ def test_terminal_events_for_other_tasks_are_ignored(env):
     env.scheduler.on_task_terminal("aa-1", QueueStatus.ERROR, SimpleNamespace(wanted_id=None))
 
     assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
-
-
-def test_disabled_wanted_list_does_nothing(env):
-    env.add()
-    with patch.object(ws, "wanted_enabled", return_value=False):
-        env.scheduler.tick()
-    assert env.queued == []
 
 
 def test_switching_off_lets_running_downloads_end_without_starting_new_ones(env):
@@ -381,14 +432,24 @@ def test_a_download_nobody_wants_any_more_is_cancelled(env):
     assert env.cancelled == ["aa-1"]
 
 
-def test_only_enabled_formats_are_downloaded(env):
-    env.results = {"direct_download": ([_release("aa-pdf", fmt="pdf")], None)}
-    with patch.object(ws, "supported_formats", return_value=frozenset({"epub", "pdf"})):
+@pytest.mark.parametrize(
+    ("fmt", "downloaded"),
+    [
+        ("pdf", False),
+        # Archives are unpacked afterwards, so they pass a format restriction.
+        ("zip", True),
+    ],
+)
+def test_only_enabled_formats_are_downloaded(env, fmt, downloaded):
+    env.results = {"direct_download": ([_release("aa-x", fmt=fmt)], None)}
+    with patch.object(ws, "supported_formats", return_value=frozenset({"epub", fmt})):
         wanted_id = env.add()
         env.scheduler.tick()
 
-    assert env.queued == []
-    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert [payload["source_id"] for payload, _, _ in env.queued] == (
+        ["aa-x"] if downloaded else []
+    )
+    assert env.item(wanted_id)["state"] == (STATE_DOWNLOADING if downloaded else STATE_WAITING)
 
 
 def test_the_library_only_counts_for_folder_targets(env):
@@ -399,14 +460,13 @@ def test_the_library_only_counts_for_folder_targets(env):
         env.add(user=env.bob)
         env.scheduler.tick()
 
-    subscribers = {sub["user_id"]: sub for sub in env.service.list_subscribers(wanted_id)}
-    assert subscribers[env.alice["id"]]["delivered_at"] is not None
-    assert subscribers[env.bob["id"]]["delivered_at"] is None
+    assert env.pending(wanted_id) == [env.bob["id"]]
     assert env.queued[-1][1] == env.bob["id"]
 
 
-def test_an_item_nobody_may_download_rests_until_rights_change(env):
-    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+@pytest.mark.parametrize("wake", ["rights", "auth_mode"])
+def test_an_item_nobody_may_download_rests_until_rights_change(env, wake):
+    env.policy = DENY_ALL
     wanted_id = env.add()
     env.scheduler.tick()
 
@@ -416,8 +476,12 @@ def test_an_item_nobody_may_download_rests_until_rights_change(env):
     assert item["next_search_at"] is None
     assert "No source" in item["last_result"]
 
-    env.user_db.set_user_settings(env.alice["id"], {"REQUEST_POLICY_DEFAULT_EBOOK": "download"})
+    if wake == "rights":
+        env.user_db.set_user_settings(env.alice["id"], {"REQUEST_POLICY_DEFAULT_EBOOK": "download"})
+    else:
+        env.scheduler._resolve_auth_mode = lambda: "none"
     env.scheduler.tick()
+    assert len(env.queued) == 1
     assert env.queued[-1][1] == env.alice["id"]
 
 
@@ -452,25 +516,19 @@ def test_release_payload_matches_the_release_modal():
     }
 
 
-class _Task(SimpleNamespace):
-    pass
+# -- delivery to several targets ---------------------------------------------------
 
 
 def _downloaded(env, wanted_id, tmp_path):
-    item = env.item(wanted_id)
-    payload, user_id, _ = env.queued[-1]
+    """The current download finished its file; extra targets get held copies of it."""
     book = tmp_path / "download" / "Dune.epub"
     book.parent.mkdir(exist_ok=True)
     book.write_text("book")
-    task = _Task(
-        wanted_id=wanted_id,
-        task_id=item["current_task_id"],
-        source=payload["source"],
-        user_id=user_id,
-        status_message=None,
-    )
-    env.scheduler.on_downloaded_file(task, book)
-    return task
+    env.scheduler.on_downloaded_file(env.task(wanted_id), book)
+
+
+def _held_copies(tmp_path):
+    return list((tmp_path / "held").rglob("Dune.epub"))
 
 
 @pytest.fixture
@@ -483,45 +541,51 @@ def two_targets(env, tmp_path):
         yield targets
 
 
-def test_another_target_gets_its_own_delivery_task_from_a_copy(env, two_targets, tmp_path):
-    del two_targets
+def _delivering_to_bob(env, tmp_path):
+    """Alice's download completed; Bob's delivery task from a copy is queued."""
     wanted_id = env.add()
     env.add(user=env.bob)
     env.scheduler.tick()
-    task = _downloaded(env, wanted_id, tmp_path)
+    _downloaded(env, wanted_id, tmp_path)
+    env.finish(wanted_id, QueueStatus.COMPLETE)
+    return wanted_id, env.queued[-1][0]["source_id"]
 
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
 
-    delivery, user_id, username = env.queued[-1]
+@pytest.mark.usefixtures("two_targets")
+def test_another_target_gets_its_own_delivery_task_from_a_copy(env, tmp_path):
+    wanted_id, extra_id = _delivering_to_bob(env, tmp_path)
+
+    _delivery, user_id, username = env.queued[-1]
     assert (user_id, username) == (env.bob["id"], "bob")
-    assert delivery["source_id"] == f"aa-1~wanted-{wanted_id}-1"
+    assert extra_id == f"aa-1~wanted-{wanted_id}-1"
     assert env.queued_kwargs[-1]["wanted_id"] == wanted_id
     assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
     # Bob counts as delivered only once his delivery task completes.
     assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
-    extra = SimpleNamespace(wanted_id=wanted_id, task_id=delivery["source_id"], status_message=None)
-    env.scheduler.on_task_terminal(delivery["source_id"], QueueStatus.COMPLETE, extra)
+    extra = SimpleNamespace(wanted_id=wanted_id, task_id=extra_id, status_message=None)
+    env.scheduler.on_task_terminal(extra_id, QueueStatus.COMPLETE, extra)
 
     subscribers = env.service.list_subscribers(wanted_id)
-    assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", delivery["source_id"]]
+    assert [sub["delivery_task_id"] for sub in subscribers] == ["aa-1", extra_id]
     assert env.item(wanted_id)["state"] == STATE_OBTAINED
     assert not any((tmp_path / "held").iterdir())
 
 
-def test_copies_are_dropped_when_the_download_fails(env, two_targets, tmp_path):
-    del two_targets
+@pytest.mark.usefixtures("two_targets")
+def test_copies_are_dropped_when_the_download_fails(env, tmp_path):
     wanted_id = env.add()
     env.add(user=env.bob)
     env.scheduler.tick()
-    task = _downloaded(env, wanted_id, tmp_path)
-    assert any((tmp_path / "held").rglob("Dune.epub"))
+    _downloaded(env, wanted_id, tmp_path)
+    assert _held_copies(tmp_path)
 
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.ERROR, task)
+    env.finish(wanted_id, QueueStatus.ERROR)
 
-    assert not any((tmp_path / "held").rglob("Dune.epub"))
+    assert not _held_copies(tmp_path)
 
 
-def test_a_shared_target_needs_no_copy(env, tmp_path):
+@pytest.mark.parametrize("owner_leaves", [False, True])
+def test_a_shared_target_needs_no_copy(env, tmp_path, owner_leaves):
     with (
         patch.object(ws, "delivery_target", return_value="folder:/books"),
         patch.object(ws, "_held_copies_dir", return_value=tmp_path / "held"),
@@ -529,131 +593,129 @@ def test_a_shared_target_needs_no_copy(env, tmp_path):
         wanted_id = env.add()
         env.add(user=env.bob)
         env.scheduler.tick()
-        task = _downloaded(env, wanted_id, tmp_path)
-        env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-
-    assert not (tmp_path / "held").exists()
-    assert len(env.queued) == 1
-    assert all(sub["delivered_at"] for sub in env.service.list_subscribers(wanted_id))
-
-
-def test_a_target_without_a_copy_keeps_its_subscriber_waiting(env, two_targets):
-    del two_targets
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    item = env.item(wanted_id)
-    task = _Task(
-        wanted_id=wanted_id,
-        task_id=item["current_task_id"],
-        source="direct_download",
-        user_id=env.alice["id"],
-        status_message=None,
-    )
-
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-
-    item = env.item(wanted_id)
-    assert item["state"] == STATE_WAITING
-    pending = [
-        sub["user_id"] for sub in env.service.list_subscribers(wanted_id) if not sub["delivered_at"]
-    ]
-    assert pending == [env.bob["id"]]
-
-
-def test_obtaining_notifies_the_admin_and_the_delivered_subscribers(env):
-    sent: list[tuple[str, int | None, str]] = []
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    with (
-        patch(
-            "shelfmark.core.notifications.notify_admin",
-            side_effect=lambda event, ctx: sent.append(("admin", None, ctx.detail)),
-        ),
-        patch(
-            "shelfmark.core.notifications.notify_user",
-            side_effect=lambda user_id, event, ctx: sent.append(("user", user_id, ctx.detail)),
-        ),
-    ):
+        if owner_leaves:
+            env.service.remove_subscriber(wanted_id, env.alice["id"])
+        _downloaded(env, wanted_id, tmp_path)
         env.finish(wanted_id, QueueStatus.COMPLETE)
 
-    assert sorted(sent, key=str) == sorted(
-        [
-            ("admin", None, "was downloaded"),
-            ("user", env.alice["id"], "was downloaded"),
-            ("user", env.bob["id"], "was downloaded"),
-        ],
-        key=str,
+    # The download lands in the folder everyone shares, so it delivers to all of them.
+    assert not (tmp_path / "held").exists()
+    assert len(env.queued) == 1
+    subscribers = env.service.list_subscribers(wanted_id)
+    assert subscribers and all(sub["delivery_task_id"] == "aa-1" for sub in subscribers)
+    assert env.item(wanted_id)["state"] == STATE_OBTAINED
+
+
+@pytest.mark.usefixtures("two_targets")
+def test_a_failed_extra_delivery_keeps_its_subscriber_waiting(env, tmp_path):
+    wanted_id, extra_id = _delivering_to_bob(env, tmp_path)
+    extra = SimpleNamespace(
+        wanted_id=wanted_id, task_id=extra_id, status_message="Email send failed"
     )
 
+    env.scheduler.on_task_terminal(extra_id, QueueStatus.ERROR, extra)
 
-def test_a_book_in_the_library_notifies_with_that_detail(env):
-    env.in_library = True
-    env.add()
-    details: list[str] = []
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert env.pending(wanted_id) == [env.bob["id"]]
+    assert not _held_copies(tmp_path)
+
+
+@pytest.mark.usefixtures("two_targets")
+def test_an_extra_delivery_that_vanishes_is_reconciled(env, tmp_path):
+    wanted_id, extra_id = _delivering_to_bob(env, tmp_path)
+    env.queue_statuses[extra_id] = (None, None)
+
+    env.scheduler._reconcile_downloads()
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+
+
+@pytest.mark.usefixtures("two_targets")
+def test_a_cancelled_extra_delivery_rejects_the_release(env, tmp_path):
+    wanted_id, extra_id = _delivering_to_bob(env, tmp_path)
+    extra = SimpleNamespace(
+        wanted_id=wanted_id, task_id=extra_id, source="direct_download", status_message="Cancelled"
+    )
+
+    env.scheduler.on_task_terminal(extra_id, QueueStatus.CANCELLED, extra)
+
+    assert env.item(wanted_id)["state"] == STATE_WAITING
+    excluded = env.service.excluded_release_keys(wanted_id, 99)
+    assert "id:direct_download:aa-1" in excluded
+
+
+@pytest.mark.usefixtures("two_targets")
+def test_no_copy_when_the_owner_no_longer_waits(env, tmp_path):
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    env.service.remove_subscriber(wanted_id, env.alice["id"])
+
+    _downloaded(env, wanted_id, tmp_path)
+    env.finish(wanted_id, QueueStatus.COMPLETE)
+
+    # Bob's target is "extra" now: he gets his own delivery task from a copy.
+    assert env.queued[-1][1] == env.bob["id"]
+    assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
+
+
+@pytest.mark.usefixtures("two_targets")
+def test_an_unhandled_end_of_an_unwanted_task_is_cleaned_up(env, tmp_path):
+    wanted_id = env.add()
+    env.add(user=env.bob)
+    env.scheduler.tick()
+    _downloaded(env, wanted_id, tmp_path)
+    env.service.delete_item(wanted_id)
+    env.queue_statuses["aa-1"] = (None, SimpleNamespace(wanted_id=wanted_id))
+
+    env.scheduler.tick()
+
+    assert env.cancelled == []
+    assert env.scheduler._payloads == {}
+    assert not _held_copies(tmp_path)
+
+
+def test_a_user_template_makes_every_user_a_target(env):
     with (
-        patch("shelfmark.core.notifications.notify_admin"),
-        patch(
-            "shelfmark.core.notifications.notify_user",
-            side_effect=lambda _uid, _event, ctx: details.append(ctx.detail),
+        patch.object(
+            ws.config,
+            "get",
+            side_effect=lambda key, default=None, user_id=None: {
+                "BOOKS_OUTPUT_MODE": "folder",
+                "TEMPLATE_ORGANIZE": "{User}/{Author}/{Title}",
+            }.get(key, default),
         ),
+        patch("shelfmark.core.utils.get_destination", return_value="/books"),
     ):
-        env.scheduler.tick()
-
-    assert details == ["is already in your library"]
+        assert ws.delivery_target(1, "alice") != ws.delivery_target(2, "bob")
 
 
-def test_changes_are_reported_to_listeners(env):
+# -- failures on our side and reconciliation ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("message", "error_type"),
+    [
+        ("Destination not writable: /books (Permission denied)", "StatusCallbackError"),
+        ("Grimmory upload failed (500)", "StatusCallbackError"),
+        ("Failed to add to qBittorrent: connection refused", "StatusCallbackError"),
+        # A worker exception happened on our side, whatever its message says.
+        ("Download failed: KeyError", "KeyError"),
+    ],
+)
+def test_a_local_failure_is_no_strike_and_backs_off(env, notes, message, error_type):
     wanted_id = env.add()
     env.scheduler.tick()
+    notes.clear()
 
-    assert wanted_id in env.changed
-
-
-def test_a_local_failure_is_no_strike_and_backs_off(env):
-    wanted_id = env.add()
-    env.scheduler.tick()
-    with patch("shelfmark.core.notifications.notify_admin") as notify_admin:
-        env.finish(
-            wanted_id,
-            QueueStatus.ERROR,
-            "Destination not writable: /books (Permission denied)",
-            staged_path="/tmp/shelfmark/Dune.epub",
-        )
+    env.finish(wanted_id, QueueStatus.ERROR, message, last_error_type=error_type)
 
     item = env.item(wanted_id)
     assert item["state"] == STATE_WAITING
     assert item["backoff_level"] == 1
     assert "could not be delivered" in item["last_result"]
     assert env.service.list_attempts(wanted_id)[0]["status"] == "cancelled"
-    notify_admin.assert_called_once()
-
-
-def test_a_release_without_a_usable_book_is_a_strike_and_moves_on(env):
-    wanted_id = env.add()
-    env.scheduler.tick()
-    env.finish(
-        wanted_id,
-        QueueStatus.ERROR,
-        "No supported file formats found",
-        staged_path="/tmp/shelfmark/Dune.zip",
-    )
-    env.scheduler.tick()
-
-    assert [payload["source_id"] for payload, _, _ in env.queued] == ["aa-1", "libgen:1"]
-    assert env.service.list_attempts(wanted_id)[-1]["status"] == "error"
-
-
-def test_a_worker_exception_counts_as_local(env):
-    wanted_id = env.add()
-    env.scheduler.tick()
-    with patch("shelfmark.core.notifications.notify_admin"):
-        env.finish(
-            wanted_id, QueueStatus.ERROR, "Download failed: KeyError", last_error_type="KeyError"
-        )
-
-    assert env.item(wanted_id)["state"] == STATE_WAITING
+    assert [event for event, user_id, _ in notes if user_id is None] == ["download_failed"]
 
 
 def test_a_lost_task_is_reconciled(env):
@@ -670,14 +732,7 @@ def test_a_lost_task_is_reconciled(env):
 def test_a_missed_terminal_event_is_reconciled(env):
     wanted_id = env.add()
     env.scheduler.tick()
-    task = SimpleNamespace(
-        wanted_id=wanted_id,
-        task_id="aa-1",
-        source="direct_download",
-        user_id=env.alice["id"],
-        status_message=None,
-    )
-    env.queue_statuses["aa-1"] = (QueueStatus.COMPLETE, task)
+    env.queue_statuses["aa-1"] = (QueueStatus.COMPLETE, env.task(wanted_id))
 
     env.scheduler.tick()
 
@@ -702,179 +757,17 @@ def test_a_manually_retried_old_attempt_still_delivers(env):
     env.scheduler.tick()
     env.service.update_item(wanted_id, state=STATE_WAITING, current_task_id=None)
 
-    old = SimpleNamespace(
-        wanted_id=wanted_id,
-        task_id="aa-1",
-        source="direct_download",
-        user_id=env.alice["id"],
-        status_message=None,
-    )
+    old = env.task(wanted_id, task_id="aa-1", source="direct_download")
     env.scheduler.on_task_terminal("aa-1", QueueStatus.COMPLETE, old)
 
     assert env.item(wanted_id)["state"] == STATE_OBTAINED
 
 
-def test_all_languages_are_searched_explicitly(env):
-    seen = []
-    with (
-        patch.object(ws.WantedScheduler, "_search_languages", staticmethod(lambda _subs: None)),
-        patch(
-            "shelfmark.core.release_search.search_source_releases",
-            side_effect=lambda source, book, **kwargs: (
-                seen.append(kwargs["languages"]) or env._search(source, book)
-            ),
-        ),
-    ):
-        env.add()
-        env.scheduler.tick()
-
-    assert seen and all(languages == ["all"] for languages in seen)
-
-
-def test_a_release_queued_by_someone_else_is_not_taken_over(env):
-    env.queue_result = (False, "Release is already in the download queue")
-    env.queue_statuses = {
-        "aa-1": (QueueStatus.DOWNLOADING, SimpleNamespace(wanted_id=None)),
-        "aa-2": (None, None),
-        "libgen:1": (None, None),
-    }
-    wanted_id = env.add()
-
-    env.scheduler.tick()
-
-    assert env.item(wanted_id)["state"] == STATE_WAITING
-    assert {attempt["status"] for attempt in env.service.list_attempts(wanted_id)} == {"cancelled"}
-
-
-def test_a_failed_extra_delivery_keeps_its_subscriber_waiting(env, two_targets, tmp_path):
-    del two_targets
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    task = _downloaded(env, wanted_id, tmp_path)
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
-
-    extra_id = env.queued[-1][0]["source_id"]
-    extra = SimpleNamespace(
-        wanted_id=wanted_id, task_id=extra_id, status_message="Email send failed"
-    )
-    env.scheduler.on_task_terminal(extra_id, QueueStatus.ERROR, extra)
-
-    item = env.item(wanted_id)
-    assert item["state"] == STATE_WAITING
-    pending = [
-        sub["user_id"] for sub in env.service.list_subscribers(wanted_id) if not sub["delivered_at"]
-    ]
-    assert pending == [env.bob["id"]]
-    assert not any((tmp_path / "held").rglob("Dune.epub"))
-
-
-def test_an_extra_delivery_that_vanishes_is_reconciled(env, two_targets, tmp_path):
-    del two_targets
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    task = _downloaded(env, wanted_id, tmp_path)
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-    env.queue_statuses[env.queued[-1][0]["source_id"]] = (None, None)
-
-    env.scheduler._reconcile_downloads()
-
-    assert env.item(wanted_id)["state"] == STATE_WAITING
-
-
-def test_no_copy_when_the_owner_no_longer_waits(env, two_targets, tmp_path):
-    del two_targets
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    env.service.remove_subscriber(wanted_id, env.alice["id"])
-
-    task = _downloaded(env, wanted_id, tmp_path)
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-
-    # Bob's target is "extra" now: he gets his own delivery task from a copy.
-    assert env.queued[-1][1] == env.bob["id"]
-    assert env.queued_kwargs[-1]["staged_path"].endswith("Dune.epub")
-
-
-def test_the_owner_leaving_a_shared_target_needs_no_copy(env, tmp_path):
-    with (
-        patch.object(ws, "delivery_target", return_value="folder:/books"),
-        patch.object(ws, "_held_copies_dir", return_value=tmp_path / "held"),
-    ):
-        wanted_id = env.add()
-        env.add(user=env.bob)
-        env.scheduler.tick()
-        env.service.remove_subscriber(wanted_id, env.alice["id"])
-        task = _downloaded(env, wanted_id, tmp_path)
-        env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-
-    # The download lands in the folder Bob shares, so it delivers to him.
-    assert len(env.queued) == 1
-    assert env.service.list_subscribers(wanted_id)[0]["delivery_task_id"] == "aa-1"
-    assert env.item(wanted_id)["state"] == STATE_OBTAINED
-
-
-def test_a_user_template_makes_every_user_a_target(env):
-    with (
-        patch.object(
-            ws.config,
-            "get",
-            side_effect=lambda key, default=None, user_id=None: {
-                "BOOKS_OUTPUT_MODE": "folder",
-                "TEMPLATE_ORGANIZE": "{User}/{Author}/{Title}",
-            }.get(key, default),
-        ),
-        patch("shelfmark.core.utils.get_destination", return_value="/books"),
-    ):
-        assert ws.delivery_target(1, "alice") != ws.delivery_target(2, "bob")
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Grimmory upload failed (500)",
-        "Could not connect to Grimmory",
-        "Failed to add to qBittorrent: connection refused",
-    ],
-)
-def test_output_and_client_outages_are_local(env, message):
-    wanted_id = env.add()
-    env.scheduler.tick()
-    with patch("shelfmark.core.notifications.notify_admin"):
-        env.finish(wanted_id, QueueStatus.ERROR, message, staged_path="/tmp/shelfmark/Dune.epub")
-
-    assert env.service.list_attempts(wanted_id)[0]["status"] == "cancelled"
-    assert env.item(wanted_id)["state"] == STATE_WAITING
-
-
-def test_a_cancelled_extra_delivery_rejects_the_release(env, two_targets, tmp_path):
-    del two_targets
-    wanted_id = env.add()
-    env.add(user=env.bob)
-    env.scheduler.tick()
-    task = _downloaded(env, wanted_id, tmp_path)
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
-    extra_id = env.queued[-1][0]["source_id"]
-    extra = SimpleNamespace(
-        wanted_id=wanted_id, task_id=extra_id, source="direct_download", status_message="Cancelled"
-    )
-
-    env.scheduler.on_task_terminal(extra_id, QueueStatus.CANCELLED, extra)
-
-    assert env.item(wanted_id)["state"] == STATE_WAITING
-    excluded = env.service.excluded_release_keys(wanted_id, 99)
-    assert "id:direct_download:aa-1" in excluded
-
-
-def _deny_everyone(env):
-    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+# -- races and settings changes ----------------------------------------------------
 
 
 def test_someone_joining_while_an_item_starts_to_rest_wakes_it(env):
-    _deny_everyone(env)
+    env.policy = DENY_ALL
     admin = env.user_db.create_user(username="carol", role="admin")
     wanted_id = env.add()
 
@@ -888,17 +781,6 @@ def test_someone_joining_while_an_item_starts_to_rest_wakes_it(env):
 
     env.scheduler.tick()
     assert env.queued[-1][1] == admin["id"]
-
-
-def test_an_auth_mode_change_wakes_resting_items(env):
-    _deny_everyone(env)
-    wanted_id = env.add()
-    env.scheduler.tick()
-    assert env.item(wanted_id)["next_search_at"] is None
-
-    env.scheduler._resolve_auth_mode = lambda: "none"
-    env.scheduler.tick()
-    assert len(env.queued) == 1
 
 
 def test_new_users_without_bookmarks_do_not_reset_backoff(env):
@@ -924,103 +806,95 @@ def test_switching_off_during_a_search_queues_nothing(env):
     assert env.item(wanted_id)["next_search_at"] is not None
 
 
-def test_archives_still_download_with_formats_restricted(env):
-    env.results = {"direct_download": ([_release("aa-zip", fmt="zip")], None)}
-    with patch.object(ws, "supported_formats", return_value=frozenset({"epub", "zip"})):
-        env.add()
-        env.scheduler.tick()
-
-    assert env.queued[-1][0]["source_id"] == "aa-zip"
+# -- found notice and format wait --------------------------------------------------
 
 
-def test_an_unhandled_end_of_an_unwanted_task_is_cleaned_up(env, two_targets, tmp_path):
-    del two_targets
+def test_finding_a_release_is_announced_once_per_search(env, notes):
     wanted_id = env.add()
-    env.add(user=env.bob)
     env.scheduler.tick()
-    _downloaded(env, wanted_id, tmp_path)
-    env.service.delete_item(wanted_id)
-    env.queue_statuses["aa-1"] = (None, SimpleNamespace(wanted_id=wanted_id))
-
+    env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
     env.scheduler.tick()
-
-    assert env.cancelled == []
-    assert env.scheduler._payloads == {}
-    assert not any((tmp_path / "held").rglob("Dune.epub"))
-
-
-def test_finding_a_release_is_announced_once_per_search(env):
-    sent: list[tuple[str, int | None, str]] = []
-    with (
-        patch(
-            "shelfmark.core.notifications.notify_admin",
-            side_effect=lambda event, ctx: sent.append((event.value, None, ctx.detail)),
-        ),
-        patch(
-            "shelfmark.core.notifications.notify_user",
-            side_effect=lambda user_id, event, ctx: sent.append((event.value, user_id, ctx.detail)),
-        ),
-        patch("shelfmark.release_sources.get_source_display_name", return_value="Anna's Archive"),
-    ):
-        wanted_id = env.add()
-        env.scheduler.tick()
-        env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
-        env.scheduler.tick()
 
     assert len(env.queued) == 2
-    assert sent == [
+    assert notes == [
         ("wanted_grabbed", None, "Anna's Archive"),
         ("wanted_grabbed", env.alice["id"], "Anna's Archive"),
     ]
 
 
-def test_lower_formats_wait_for_the_good_enough_one(env):
+def test_the_found_notice_skips_subscribers_the_source_cannot_serve(env, notes):
+    env.policy = NO_DIRECT_DOWNLOAD
+    env.user_db.set_user_settings(
+        env.bob["id"],
+        {
+            "REQUEST_POLICY_RULES": [
+                {"source": "direct_download", "content_type": "ebook", "mode": "download"}
+            ]
+        },
+    )
+    env.add()
+    env.add(user=env.bob)
+
+    env.scheduler.tick()
+
+    assert env.queued[-1][0]["source"] == "direct_download"
+    assert [user_id for _e, user_id, _d in notes if user_id is not None] == [env.bob["id"]]
+
+
+def _joined(env, wanted_id, when):
+    """Pretend the only subscriber bookmarked the item at ``when``."""
+    subscriber = {**env.service.list_subscribers(wanted_id)[0], "created_at": when}
+    return patch.object(env.service, "list_subscribers", return_value=[subscriber])
+
+
+def test_lower_formats_wait_and_the_next_search_comes_no_later_than_the_wait_ends(env):
     env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
-    with patch.object(ws, "format_wait", return_value=(None, 7.0)):
-        wanted_id = env.add()
+    wanted_id = env.add()
+    env.service.update_item(wanted_id, backoff_level=2)
+    # Bookmarked long enough ago that the 7-day wait ends in about two hours.
+    joined = (datetime.now(UTC) - timedelta(days=7) + timedelta(hours=2)).isoformat()
+    with patch.object(ws, "format_wait", return_value=(None, 7.0)), _joined(env, wanted_id, joined):
         env.scheduler.tick()
 
     item = env.item(wanted_id)
     assert env.queued == []
-    assert item["last_result"].startswith("Only MOBI found; waiting for EPUB until ")
     assert item["state"] == STATE_WAITING
+    assert item["last_result"].startswith("Only MOBI found; waiting for EPUB until ")
+    next_search = datetime.fromisoformat(item["next_search_at"])
+    assert next_search <= datetime.now(UTC) + timedelta(hours=2, minutes=1)
 
 
 def test_the_wait_for_a_format_ends(env):
     env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
-    env.add()
-    with (
-        patch.object(ws, "format_wait", return_value=(None, 7.0)),
-        patch.object(
-            env.service,
-            "list_subscribers",
-            side_effect=lambda _id: [
-                {
-                    "id": 1,
-                    "user_id": env.alice["id"],
-                    "username": "alice",
-                    "created_at": "2000-01-01T00:00:00+00:00",
-                    "delivered_at": None,
-                }
-            ],
-        ),
-    ):
+    wanted_id = env.add()
+    with patch.object(ws, "format_wait", return_value=(None, 7.0)), _joined(env, wanted_id, DUE):
         env.scheduler.tick()
 
     assert env.queued[-1][0]["source_id"] == "aa-mobi"
 
 
-def test_an_unreleased_book_waits_without_searching(env):
-    wanted_id = env.add(release_date="2999-03-12")
-    searched: list[str] = []
-    with patch(
-        "shelfmark.core.release_search.search_source_releases",
-        side_effect=lambda source, *_a, **_k: searched.append(source),
+def test_a_switched_off_cutoff_still_marks_the_line(env):
+    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
+    with (
+        patch.object(ws, "format_wait", return_value=("pdf", 7.0)),
+        patch.object(ws, "format_order", return_value=("epub", "mobi", "pdf")),
     ):
+        env.add()
         env.scheduler.tick()
 
+    assert env.queued[-1][0]["source_id"] == "aa-mobi"
+
+
+# -- release dates -----------------------------------------------------------------
+
+
+def test_an_unreleased_book_waits_without_searching(env):
+    wanted_id = env.add(release_date="2999-03-12")
+
+    env.scheduler.tick()
+
     item = env.item(wanted_id)
-    assert searched == []
+    assert env.search_kwargs == []
     assert item["state"] == STATE_WAITING
     assert item["search_count"] == 0
     # The date is checked again within a week rather than trusted until 2999.
@@ -1060,7 +934,7 @@ def test_search_now_searches_a_book_not_out_yet(env):
     env.scheduler.tick()
     assert env.queued == []
 
-    env.service.update_item(wanted_id, next_search_at="2000-01-01T00:00:00+00:00")
+    env.service.update_item(wanted_id, next_search_at=DUE)
     env.scheduler.search_now(wanted_id)
     env.scheduler.tick()
 
@@ -1068,9 +942,12 @@ def test_search_now_searches_a_book_not_out_yet(env):
     assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
 
 
+# -- picking a release by hand -----------------------------------------------------
+
+
 def test_a_failed_pick_keeps_the_planned_search(env):
     wanted_id = env.add()
-    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00", backoff_level=3)
+    env.service.update_item(wanted_id, next_search_at=LATER, backoff_level=3)
     env.scheduler.grab(wanted_id, _release("aa-9"), {"user_id": env.alice["id"]})
 
     env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
@@ -1112,11 +989,11 @@ def test_releases_are_evaluated_like_the_wanted_list_would(env):
     assert reasons["irc:x-1"] == "Source not used by the wanted list"
 
 
-def test_a_picked_release_downloads_for_every_subscriber(env, two_targets, tmp_path):
-    del two_targets
+@pytest.mark.usefixtures("two_targets")
+def test_a_picked_release_downloads_for_every_subscriber(env, tmp_path):
     wanted_id = env.add()
     env.add(user=env.bob)
-    env.service.update_item(wanted_id, next_search_at="2999-01-01T00:00:00+00:00")
+    env.service.update_item(wanted_id, next_search_at=LATER)
 
     queued, error = env.scheduler.grab(
         wanted_id, _release("aa-2", fmt="mobi"), {"user_id": env.bob["id"], "username": "bob"}
@@ -1126,8 +1003,8 @@ def test_a_picked_release_downloads_for_every_subscriber(env, two_targets, tmp_p
     assert env.queued[-1][0]["source_id"] == "aa-2"
     assert env.queued_kwargs[-1]["wanted_id"] == wanted_id
     assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
-    task = _downloaded(env, wanted_id, tmp_path)
-    env.scheduler.on_task_terminal(task.task_id, QueueStatus.COMPLETE, task)
+    _downloaded(env, wanted_id, tmp_path)
+    env.finish(wanted_id, QueueStatus.COMPLETE)
     # Bob's download lands in his target; Alice gets hers from a copy.
     assert env.queued[-1][1] == env.alice["id"]
 
@@ -1154,68 +1031,7 @@ def test_releases_from_the_frontend_are_validated():
     assert ws.release_from_dict(["nope"]) is None
 
 
-def test_a_switched_off_cutoff_still_marks_the_line(env):
-    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
-    with (
-        patch.object(ws, "format_wait", return_value=("pdf", 7.0)),
-        patch.object(ws, "format_order", return_value=("epub", "mobi", "pdf")),
-    ):
-        env.add()
-        env.scheduler.tick()
-
-    assert env.queued[-1][0]["source_id"] == "aa-mobi"
-
-
-def test_the_next_search_comes_no_later_than_the_wait_ends(env):
-    from datetime import UTC, datetime, timedelta
-
-    env.results = {"direct_download": ([_release("aa-mobi", fmt="mobi")], None)}
-    wanted_id = env.add()
-    env.service.update_item(wanted_id, backoff_level=2)
-    # Bookmarked long enough ago that the 7-day wait ends in about two hours.
-    joined = (datetime.now(UTC) - timedelta(days=7) + timedelta(hours=2)).isoformat()
-    subscriber = {**env.service.list_subscribers(wanted_id)[0], "created_at": joined}
-    with (
-        patch.object(ws, "format_wait", return_value=(None, 7.0)),
-        patch.object(env.service, "list_subscribers", return_value=[subscriber]),
-    ):
-        env.scheduler.tick()
-
-    next_search = datetime.fromisoformat(env.item(wanted_id)["next_search_at"])
-    assert next_search <= datetime.now(UTC) + timedelta(hours=2, minutes=1)
-
-
-def test_the_found_notice_skips_subscribers_the_source_cannot_serve(env):
-    env.policy = {
-        "REQUESTS_ENABLED": True,
-        "REQUEST_POLICY_DEFAULT_EBOOK": "download",
-        "REQUEST_POLICY_RULES": [
-            {"source": "direct_download", "content_type": "ebook", "mode": "request_release"}
-        ],
-    }
-    env.user_db.set_user_settings(
-        env.bob["id"],
-        {
-            "REQUEST_POLICY_RULES": [
-                {"source": "direct_download", "content_type": "ebook", "mode": "download"}
-            ]
-        },
-    )
-    sent: list[int | None] = []
-    with (
-        patch("shelfmark.core.notifications.notify_admin"),
-        patch(
-            "shelfmark.core.notifications.notify_user",
-            side_effect=lambda user_id, *_a: sent.append(user_id),
-        ),
-        patch("shelfmark.release_sources.get_source_display_name", return_value="AA"),
-    ):
-        env.add()
-        env.add(user=env.bob)
-        env.scheduler.tick()
-
-    assert env.queued[-1][0]["source"] == "direct_download"
-    assert sent == [env.bob["id"]]
+# -- indexer feeds -----------------------------------------------------------------
 
 
 class _FeedSource:
@@ -1248,33 +1064,24 @@ def feed(env):
 
 def _searched_once(env, **book):
     wanted_id = env.add(**book)
-    env.service.update_item(wanted_id, search_count=1, next_search_at="2999-01-01T00:00:00+00:00")
+    env.service.update_item(wanted_id, search_count=1, next_search_at=LATER)
     return wanted_id
-
-
-def test_a_release_in_a_feed_is_downloaded_for_a_waiting_bookmark(env, feed):
-    wanted_id = _searched_once(env)
-
-    env.scheduler.tick()
-
-    assert env.queued[-1][0]["source_id"] == "p-1"
-    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
-    assert len(env.scheduler._searches) == 0
 
 
 def test_feeds_are_read_once_per_interval_and_each_release_matched_once(env, feed):
     wanted_id = _searched_once(env)
     env.scheduler.tick()
+    # A feed release is downloaded for a waiting bookmark without a search.
+    assert env.queued[-1][0]["source_id"] == "p-1"
+    assert env.item(wanted_id)["state"] == STATE_DOWNLOADING
+    assert len(env.scheduler._searches) == 0
     env.finish(wanted_id, QueueStatus.ERROR, "Download failed")
     env.scheduler.tick()
     assert feed.reads == 1
 
     env.scheduler._feed_checked_at -= 15 * 60
     env.service.update_item(
-        wanted_id,
-        state=STATE_WAITING,
-        current_task_id=None,
-        next_search_at="2999-01-01T00:00:00+00:00",
+        wanted_id, state=STATE_WAITING, current_task_id=None, next_search_at=LATER
     )
     env.scheduler.tick()
 
@@ -1346,15 +1153,23 @@ def test_one_failing_match_does_not_cost_the_others_the_feed(env, feed):
     assert env.item(second)["state"] == STATE_DOWNLOADING
 
 
-def test_a_watch_bookmarks_only_books_it_has_not_seen(env):
+# -- watches and approvals ---------------------------------------------------------
+
+
+def _watch(env, seen):
     watch, _ = env.service.add_watch(
         user_id=env.alice["id"],
         provider="hardcover",
         fields={"series": "id:1"},
-        label="Dune",
-        seen=["hardcover:1"],
+        label="D",
+        seen=seen,
     )
-    env.service.update_watch(watch["id"], seen=["hardcover:1"], last_result="", synced_at="2000")
+    env.service.update_watch(watch["id"], seen=seen, last_result="", synced_at="2000")
+    return watch["id"]
+
+
+def test_a_watch_bookmarks_only_books_it_has_not_seen(env):
+    watch_id = _watch(env, ["hardcover:1"])
     books = [
         BookMetadata(provider="hardcover", provider_id="1", title="Dune"),
         BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah"),
@@ -1365,17 +1180,14 @@ def test_a_watch_bookmarks_only_books_it_has_not_seen(env):
 
     items = env.service.list_items(user_id=env.alice["id"], include_all=False)
     assert [item["provider_id"] for item in items] == ["2"]
-    synced = env.service.get_watch(watch["id"])
+    synced = env.service.get_watch(watch_id)
     assert synced["seen"] == ["hardcover:1", "hardcover:2"]
     assert synced["last_result"] == "Bookmarked 1 new book(s)"
 
 
 def test_a_watch_of_someone_without_rights_bookmarks_nothing(env):
-    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
-    env.service.add_watch(
-        user_id=env.alice["id"], provider="hardcover", fields={"series": "id:1"}, label="D", seen=[]
-    )
-    env.service.update_watch(1, seen=[], last_result="", synced_at="2000")
+    env.policy = DENY_ALL
+    watch_id = _watch(env, [])
     book = BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah")
     with patch(
         "shelfmark.core.wanted_watches.fetch_watch_books", return_value=([book], 1)
@@ -1383,41 +1195,21 @@ def test_a_watch_of_someone_without_rights_bookmarks_nothing(env):
         env.scheduler._sync_watch()
 
     fetch.assert_not_called()
-    assert env.service.get_watch(1)["last_result"].startswith("Not allowed")
-
-
-def test_an_approved_bookmark_downloads_for_someone_who_must_request(env):
-    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
-    admin = env.user_db.create_user(username="root", role="admin")
-    env.service.add(user_id=env.alice["id"], book_data=BOOK, approved_by=admin["id"])
-
-    env.scheduler.tick()
-
-    assert env.queued[-1][1] == env.alice["id"]
+    assert env.service.get_watch(watch_id)["last_result"].startswith("Not allowed")
 
 
 def test_a_watch_made_during_an_outage_takes_its_first_read_as_the_start(env):
-    watch, _ = env.service.add_watch(
-        user_id=env.alice["id"],
-        provider="hardcover",
-        fields={"series": "id:1"},
-        label="D",
-        seen=None,
-    )
-    env.service.update_watch(watch["id"], seen=None, last_result="", synced_at="2000")
+    watch_id = _watch(env, None)
     books = [BookMetadata(provider="hardcover", provider_id=str(n), title="Dune") for n in (1, 2)]
     with patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=(books, 2)):
         env.scheduler._sync_watch()
 
     assert env.service.list_items(user_id=env.alice["id"], include_all=False) == []
-    assert env.service.get_watch(watch["id"])["seen"] == ["hardcover:1", "hardcover:2"]
+    assert env.service.get_watch(watch_id)["seen"] == ["hardcover:1", "hardcover:2"]
 
 
 def test_a_book_that_could_not_be_bookmarked_is_tried_again(env):
-    watch, _ = env.service.add_watch(
-        user_id=env.alice["id"], provider="hardcover", fields={"series": "id:1"}, label="D", seen=[]
-    )
-    env.service.update_watch(watch["id"], seen=[], last_result="", synced_at="2000")
+    watch_id = _watch(env, [])
     book = BookMetadata(provider="hardcover", provider_id="2", title="Dune Messiah")
     with (
         patch("shelfmark.core.wanted_watches.fetch_watch_books", return_value=([book], 1)),
@@ -1425,15 +1217,21 @@ def test_a_book_that_could_not_be_bookmarked_is_tried_again(env):
     ):
         env.scheduler._sync_watch()
 
-    assert env.service.get_watch(watch["id"])["seen"] == []
+    assert env.service.get_watch(watch_id)["seen"] == []
 
 
-def test_an_approval_ends_when_its_admin_is_no_admin_any_more(env):
-    env.policy = {"REQUESTS_ENABLED": True, "REQUEST_POLICY_DEFAULT_EBOOK": "request_release"}
+@pytest.mark.parametrize("admin_demoted", [False, True])
+def test_an_approval_lets_someone_who_must_request_download_while_its_admin_is_one(
+    env, admin_demoted
+):
+    env.policy = DENY_ALL
     admin = env.user_db.create_user(username="root", role="admin")
     env.service.add(user_id=env.alice["id"], book_data=BOOK, approved_by=admin["id"])
-    env.user_db.update_user(admin["id"], role="user")
+    if admin_demoted:
+        env.user_db.update_user(admin["id"], role="user")
 
     env.scheduler.tick()
 
-    assert env.queued == []
+    assert [user_id for _payload, user_id, _name in env.queued] == (
+        [] if admin_demoted else [env.alice["id"]]
+    )
