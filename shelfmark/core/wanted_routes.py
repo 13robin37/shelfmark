@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from flask import Flask, Response, jsonify, request, session
@@ -29,8 +30,24 @@ if TYPE_CHECKING:
 
     from shelfmark.core.user_db import UserDB
     from shelfmark.download.wanted_scheduler import WantedScheduler
+    from shelfmark.metadata_providers import BookMetadata
 
 logger = setup_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _WatchRequest:
+    """A validated watch or bulk-bookmark request with the books it names."""
+
+    viewer_id: int | None
+    is_admin: bool
+    label: str
+    provider: str
+    fields: dict[str, str]
+    owner_id: int | None
+    approved_by: int | None
+    books: list[BookMetadata]
+    total: int
 
 
 def _error(message: str, status_code: int, code: str | None = None) -> tuple[Response, int]:
@@ -151,17 +168,72 @@ def register_wanted_routes(
             if source in available
         )
 
+    def _is_subscribed(wanted_id: int, viewer_id: int | None) -> bool:
+        return any(
+            sub.get("user_id") == viewer_id for sub in wanted_service.list_subscribers(wanted_id)
+        )
+
     def _item_for_viewer(
         wanted_id: int, viewer_id: int | None, is_admin: bool
     ) -> dict[str, Any] | None:
         item = wanted_service.get_item(wanted_id)
-        if item is None:
-            return None
-        if is_admin or any(
-            sub.get("user_id") == viewer_id for sub in wanted_service.list_subscribers(wanted_id)
-        ):
+        if item is not None and (is_admin or _is_subscribed(wanted_id, viewer_id)):
             return item
         return None
+
+    def _read_watch_request(max_books: int) -> _WatchRequest | ResponseReturnValue:
+        from shelfmark.core.wanted_watches import (
+            WatchError,
+            WatchFetchError,
+            fetch_watch_books,
+            normalize_watch,
+        )
+
+        viewer_id, is_admin, gate = _viewer()
+        if gate is not None:
+            return gate
+        if not wanted_enabled():
+            return _error("The wanted list is disabled", 403, code="wanted_disabled")
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("Request body must be a JSON object", 400)
+        try:
+            provider, fields = normalize_watch(payload.get("provider"), payload.get("fields"))
+        except WatchError as exc:
+            return _error(str(exc), 400)
+        label = normalize_optional_text(payload.get("label")) or next(iter(fields.values()))
+
+        owner_id, approved_by = viewer_id, None
+        requested = normalize_positive_int(payload.get("user_id"))
+        if requested is None or requested == viewer_id:
+            if not _can_bookmark(viewer_id, is_admin):
+                return _error(
+                    "You may not download from any wanted source", 403, code="wanted_forbidden"
+                )
+        else:
+            # Admins may act for someone else; their approval lets those bookmarks download.
+            if not is_admin:
+                return _error("Admin access required", 403)
+            if user_db is None or user_db.get_user(user_id=requested) is None:
+                return _error("User not found", 404)
+            owner_id, approved_by = requested, viewer_id
+
+        try:
+            books, total = fetch_watch_books(provider, fields, max_books)
+        except (WatchFetchError, OSError, RuntimeError, ValueError) as exc:
+            logger.warning("Wanted: could not read %s: %s", label, exc)
+            return _error(f"Could not read {label}: {exc}", 502)
+        return _WatchRequest(
+            viewer_id=viewer_id,
+            is_admin=is_admin,
+            label=label,
+            provider=provider,
+            fields=fields,
+            owner_id=owner_id,
+            approved_by=approved_by,
+            books=books,
+            total=total,
+        )
 
     @app.route("/api/wanted/status", methods=["GET"])
     def api_wanted_status() -> ResponseReturnValue:
@@ -267,11 +339,6 @@ def register_wanted_routes(
         _changed(None)
         return jsonify({"status": "cleared", "cleared": cleared})
 
-    def _subscribed(wanted_id: int, viewer_id: int | None) -> bool:
-        return any(
-            sub.get("user_id") == viewer_id for sub in wanted_service.list_subscribers(wanted_id)
-        )
-
     @app.route("/api/wanted/<int:wanted_id>/evaluate", methods=["POST"])
     def api_wanted_evaluate(wanted_id: int) -> ResponseReturnValue:
         from shelfmark.download.wanted_scheduler import release_from_dict
@@ -297,7 +364,7 @@ def register_wanted_routes(
             return gate
         if not wanted_enabled():
             return _error("The wanted list is disabled", 403, code="wanted_disabled")
-        if scheduler is None or not _subscribed(wanted_id, viewer_id):
+        if scheduler is None or not _is_subscribed(wanted_id, viewer_id):
             return _error("You have not bookmarked this book", 404)
         payload = request.get_json(silent=True)
         release = release_from_dict(payload.get("release") if isinstance(payload, dict) else None)
@@ -316,53 +383,6 @@ def register_wanted_routes(
         _changed(wanted_id)
         return jsonify({"status": "queued", "task_id": release.source_id})
 
-    def _watch_target(payload: dict[str, Any]) -> tuple[str, dict[str, str], str]:
-        from shelfmark.core.wanted_watches import normalize_watch
-
-        provider, fields = normalize_watch(payload.get("provider"), payload.get("fields"))
-        label = normalize_optional_text(payload.get("label")) or next(iter(fields.values()))
-        return provider, fields, label
-
-    def _owner(
-        payload: dict[str, Any], viewer_id: int | None, is_admin: bool
-    ) -> tuple[int | None, int | None, ResponseReturnValue | None]:
-        """(whose bookmarks, approving admin, error) for a watch or bulk bookmark."""
-        requested = normalize_positive_int(payload.get("user_id"))
-        if requested is None or requested == viewer_id:
-            if not _can_bookmark(viewer_id, is_admin):
-                return (
-                    None,
-                    None,
-                    _error(
-                        "You may not download from any wanted source", 403, code="wanted_forbidden"
-                    ),
-                )
-            return viewer_id, None, None
-        # Admins may act for someone else; their approval lets those bookmarks download.
-        if not is_admin:
-            return None, None, _error("Admin access required", 403)
-        if user_db is None or user_db.get_user(user_id=requested) is None:
-            return None, None, _error("User not found", 404)
-        return requested, viewer_id, None
-
-    def _watch_request() -> tuple[
-        dict[str, Any] | None, int | None, bool, ResponseReturnValue | None
-    ]:
-        viewer_id, is_admin, gate = _viewer()
-        if gate is not None:
-            return None, viewer_id, is_admin, gate
-        if not wanted_enabled():
-            return (
-                None,
-                viewer_id,
-                is_admin,
-                _error("The wanted list is disabled", 403, code="wanted_disabled"),
-            )
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return None, viewer_id, is_admin, _error("Request body must be a JSON object", 400)
-        return payload, viewer_id, is_admin, None
-
     @app.route("/api/wanted/watches", methods=["GET"])
     def api_wanted_watches() -> ResponseReturnValue:
         viewer_id, is_admin, gate = _viewer()
@@ -379,49 +399,33 @@ def register_wanted_routes(
 
     @app.route("/api/wanted/watches", methods=["POST"])
     def api_wanted_watch() -> ResponseReturnValue:
-        from shelfmark.core.wanted_watches import (
-            MAX_WATCH_BOOKS,
-            WatchError,
-            WatchFetchError,
-            book_key,
-            fetch_watch_books,
-        )
+        from shelfmark.core.wanted_watches import MAX_WATCH_BOOKS, book_key
 
-        payload, viewer_id, is_admin, gate = _watch_request()
-        if gate is not None or payload is None:
-            return gate or _error("Request body must be a JSON object", 400)
-        try:
-            provider, fields, label = _watch_target(payload)
-        except WatchError as exc:
-            return _error(str(exc), 400)
-        owner_id, approved_by, owner_gate = _owner(payload, viewer_id, is_admin)
-        if owner_gate is not None:
-            return owner_gate
-        try:
-            books, total = fetch_watch_books(provider, fields)
-        except (WatchFetchError, OSError, RuntimeError, ValueError) as exc:
-            logger.warning("Wanted: could not read %s: %s", label, exc)
-            return _error(f"Could not read {label}: {exc}", 502)
-        # What is there now is what the user sees; a watch adds what comes later. Nothing
-        # read may be an outage: then the first sync that reads books sets the start.
+        watch_request = _read_watch_request(MAX_WATCH_BOOKS)
+        if not isinstance(watch_request, _WatchRequest):
+            return watch_request
+        books, total = watch_request.books, watch_request.total
         note = (
             f"Only the first {MAX_WATCH_BOOKS} of {total} books are watched"
             if total > len(books)
             else None
         )
         watch, created = wanted_service.add_watch(
-            user_id=owner_id,
-            provider=provider,
-            fields=fields,
-            label=label,
+            user_id=watch_request.owner_id,
+            provider=watch_request.provider,
+            fields=watch_request.fields,
+            label=watch_request.label,
+            # The books there now count as seen. Reading none may be an outage, so then
+            # the first sync that reads books sets them.
             seen=sorted({book_key(book) for book in books}) if books else None,
-            approved_by=approved_by,
+            approved_by=watch_request.approved_by,
             last_result=note,
         )
         _changed(None)
-        return jsonify({"watch": serialize_watch(watch, viewer_id=viewer_id, is_admin=is_admin)}), (
-            201 if created else 200
+        serialized = serialize_watch(
+            watch, viewer_id=watch_request.viewer_id, is_admin=watch_request.is_admin
         )
+        return jsonify({"watch": serialized}), (201 if created else 200)
 
     @app.route("/api/wanted/watches/<int:watch_id>", methods=["DELETE"])
     def api_wanted_unwatch(watch_id: int) -> ResponseReturnValue:
@@ -438,36 +442,18 @@ def register_wanted_routes(
     @app.route("/api/wanted/bulk", methods=["POST"])
     def api_wanted_bulk() -> ResponseReturnValue:
         from shelfmark.core import library_index
-        from shelfmark.core.wanted_watches import (
-            MAX_BULK_BOOKS,
-            WatchError,
-            WatchFetchError,
-            book_data_from_metadata,
-            book_key,
-            fetch_watch_books,
-        )
+        from shelfmark.core.wanted_watches import MAX_BULK_BOOKS, book_data_from_metadata, book_key
 
-        payload, viewer_id, is_admin, gate = _watch_request()
-        if gate is not None or payload is None:
-            return gate or _error("Request body must be a JSON object", 400)
-        try:
-            provider, fields, label = _watch_target(payload)
-        except WatchError as exc:
-            return _error(str(exc), 400)
-        owner_id, approved_by, owner_gate = _owner(payload, viewer_id, is_admin)
-        if owner_gate is not None:
-            return owner_gate
-        try:
-            books, _total = fetch_watch_books(provider, fields, MAX_BULK_BOOKS)
-        except (WatchFetchError, OSError, RuntimeError, ValueError) as exc:
-            logger.warning("Wanted: could not read %s: %s", label, exc)
-            return _error(f"Could not read {label}: {exc}", 502)
+        watch_request = _read_watch_request(MAX_BULK_BOOKS)
+        if not isinstance(watch_request, _WatchRequest):
+            return watch_request
+        owner_id = watch_request.owner_id
         already = {
             f"{item['provider']}:{item['provider_id']}"
             for item in wanted_service.list_items(user_id=owner_id, include_all=False)
         }
         counts = {"bookmarked": 0, "already": 0, "in_library": 0, "failed": 0}
-        for book in books:
+        for book in watch_request.books:
             if book_key(book) in already:
                 counts["already"] += 1
                 continue
@@ -482,12 +468,14 @@ def register_wanted_routes(
                 wanted_service.add(
                     user_id=owner_id,
                     book_data=book_data_from_metadata(book),
-                    approved_by=approved_by,
+                    approved_by=watch_request.approved_by,
                 )
                 counts["bookmarked"] += 1
             except WantedServiceError, RuntimeError:
                 counts["failed"] += 1
-        logger.info("Wanted: bookmarked %d book(s) of %s", counts["bookmarked"], label)
+        logger.info(
+            "Wanted: bookmarked %d book(s) of %s", counts["bookmarked"], watch_request.label
+        )
         _changed(None)
         return jsonify(counts)
 

@@ -574,35 +574,7 @@ def _queue_status_for_routes(user_id: int | None = None) -> dict[str, dict[str, 
     return backend.queue_status(user_id=user_id)
 
 
-if user_db is not None:
-    try:
-        from shelfmark.core.activity_routes import register_activity_routes
-        from shelfmark.core.request_routes import register_request_routes
-
-        register_request_routes(
-            app,
-            user_db,
-            resolve_auth_mode=_resolve_auth_mode_for_routes,
-            queue_release=_queue_release_for_routes,
-            ws_manager=ws_manager,
-            wanted_service=wanted_service,
-            # Defined further down; looked up when called.
-            on_wanted_change=lambda wanted_id: _on_wanted_route_change(wanted_id),  # noqa: PLW0108
-        )
-        if download_history_service is not None and activity_view_state_service is not None:
-            register_activity_routes(
-                app,
-                user_db,
-                activity_view_state_service=activity_view_state_service,
-                download_history_service=download_history_service,
-                resolve_auth_mode=_resolve_auth_mode_for_routes,
-                queue_status=_queue_status_for_routes,
-                sync_request_delivery_states=sync_delivery_states_from_queue_status,
-                emit_request_updates=_emit_request_updates,
-                ws_manager=ws_manager,
-            )
-    except _IMPORT_OPERATIONAL_ERRORS as e:
-        logger.warning("Failed to register request routes: %s", e)
+wanted_scheduler: WantedScheduler | None = None
 
 
 def _emit_wanted_update(wanted_id: int | None) -> None:
@@ -610,16 +582,12 @@ def _emit_wanted_update(wanted_id: int | None) -> None:
     emit_ws_event(
         ws_manager, event_name="wanted_update", room="admins", payload={"wanted_id": wanted_id}
     )
-    if wanted_service is None:
+    if wanted_service is None or user_db is None:
         return
     try:
         if wanted_id is None:
             # Bulk changes may have removed users' bookmarks; tell everyone to reload.
-            user_ids = (
-                {user["id"] for user in user_db.list_users()}
-                if user_db is not None
-                else wanted_service.all_subscriber_ids()
-            )
+            user_ids = {user["id"] for user in user_db.list_users()}
         else:
             user_ids = {
                 sub["user_id"]
@@ -638,18 +606,47 @@ def _emit_wanted_update(wanted_id: int | None) -> None:
         )
 
 
-def _wanted_task_lookup(task_id: str) -> tuple[QueueStatus | None, Any]:
-    queue = backend.book_queue
-    return queue.get_task_status(task_id), queue.get_task(task_id)
-
-
 def _on_wanted_route_change(wanted_id: int | None) -> None:
     if wanted_scheduler is not None:
         wanted_scheduler.wake()
     _emit_wanted_update(wanted_id)
 
 
-wanted_scheduler: WantedScheduler | None = None
+if user_db is not None:
+    try:
+        from shelfmark.core.activity_routes import register_activity_routes
+        from shelfmark.core.request_routes import register_request_routes
+
+        register_request_routes(
+            app,
+            user_db,
+            resolve_auth_mode=_resolve_auth_mode_for_routes,
+            queue_release=_queue_release_for_routes,
+            ws_manager=ws_manager,
+            wanted_service=wanted_service,
+            on_wanted_change=_on_wanted_route_change,
+        )
+        if download_history_service is not None and activity_view_state_service is not None:
+            register_activity_routes(
+                app,
+                user_db,
+                activity_view_state_service=activity_view_state_service,
+                download_history_service=download_history_service,
+                resolve_auth_mode=_resolve_auth_mode_for_routes,
+                queue_status=_queue_status_for_routes,
+                sync_request_delivery_states=sync_delivery_states_from_queue_status,
+                emit_request_updates=_emit_request_updates,
+                ws_manager=ws_manager,
+            )
+    except _IMPORT_OPERATIONAL_ERRORS as e:
+        logger.warning("Failed to register request routes: %s", e)
+
+
+def _wanted_task_lookup(task_id: str) -> tuple[QueueStatus | None, Any]:
+    queue = backend.book_queue
+    return queue.get_task_status(task_id), queue.get_task(task_id)
+
+
 if wanted_service is not None:
     import_module("shelfmark.config.wanted_settings")
     from shelfmark.core.wanted_routes import register_wanted_routes

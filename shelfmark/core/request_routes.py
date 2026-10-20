@@ -1050,7 +1050,7 @@ def register_request_routes(
             return _error_response("Only book requests for ebooks can go on the wanted list", 400)
         raw_book = request_row.get("book_data")
         try:
-            # Checked before the request changes, so a bad book cannot leave it half done.
+            # Validate before fulfilling, so a bad book leaves the request untouched.
             book_data = normalize_book_data(
                 {**(raw_book if isinstance(raw_book, dict) else {}), "content_type": "ebook"}
             )
@@ -1071,7 +1071,7 @@ def register_request_routes(
             )
         except RequestServiceError as exc:
             return _error_response(str(exc), exc.status_code, code=exc.code)
-        # Only now: a request cancelled or decided meanwhile must not leave a bookmark.
+        # Bookmark only once fulfilling succeeded: a request decided meanwhile gets none.
         item, _created = wanted_service.add(
             user_id=request_row["user_id"], book_data=book_data, approved_by=admin_user_id
         )
